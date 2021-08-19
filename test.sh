@@ -236,6 +236,38 @@ myscp_to_somewhere() {
 
 }
 
+#check_and_mkpath_ftp 192.168.40.130 bobbi qwer1234 /shell
+check_and_mkpath_ftp() {
+        local ip=$1
+        local user=$2
+        local password=$3
+        local dstdir=$4
+
+        lftp -u ${user},${password} -p 21 ftp://${ip} > /dev/null 2>&1 << EOF
+        cd ${dstdir}
+EOF
+
+        if [ $? -eq 0 ]; then
+                echo "${dstdir} is exist"
+                return 0
+        fi
+        lftp -u ${user},${password} -p 21 ftp://${ip} << EOF
+        mkdir ${dstdir}
+EOF
+        if [ $? -eq 0 ]; then
+                echo "mkdir ${dstdir}"
+                return 0
+        else
+                echo "mkdir ${dstdir} failed!"
+                return 1
+        fi
+}
+
+
+myftp_to_somewhere() {
+
+}
+
 get_backup_operation() {
 	eval oper=$1
 	local type=`crudini --get ${INI_FILE} conf backup_type`
@@ -249,6 +281,8 @@ get_backup_operation() {
 			get_package expect expect
 			;;
 		ftp)
+			eval $oper='myftp_to_somewhere'
+			get_package lftp lftp
 			;;
 		*)
 			echo "in *"
