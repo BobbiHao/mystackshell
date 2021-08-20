@@ -1,6 +1,6 @@
 #!/bin/bash
 
-INI_FILE=test.ini
+INI_FILE=backup.ini
 
 datetime=`date +%Y-%m-%d`
 datetime_tosql=`date "+%Y-%m-%d %H:%M:%S"`
