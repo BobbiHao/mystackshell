@@ -45,46 +45,47 @@ check_and_mkpath() {
 
 declare -A dic
 
-init_dic() {
-	NOVA="nova"
-	NEUTRON="neutron"
-	CINDER="cinder"
-	CEILOMETER="ceilometer"
-	LOG="log"
-	
-	ETC_NOVA="/etc/nova"
-	ETC_NEUTRON="/etc/neutron"
-	ETC_CINDER="/etc/cinder"
-	ETC_CEILOMETER="/etc/ceilometer"
-	VAR_LOG="/var/log"
-
-	dic=(
-        	#[${NOVA}]=	'$ETC_NOVA               $BAK_NOVA       每周备份一次    52      12'
-        	#[${NEUTRON}]=	'$ETC_NEUTRON            $BAK_NEUTRON    每周备份一次    24      12'
-        	#[${CINDER}]=	'$ETC_CINDER             $BAK_CINDER     每周备份一次    56      12'
-        	#[${CEILOMETER}]='$ETC_CEILOMETER         $BAK_CEILOMETER 每周备份一次    56      12'
-        	#[${LOG}]=	'$VAR_LOG		 $BAK_LOG        每周备份一次    56      12'
-		[${NOVA}]="$ETC_NOVA"
-        	[${NEUTRON}]="$ETC_NEUTRON"
-        	[${CINDER}]="$ETC_CINDER"
-        	[${CEILOMETER}]="$ETC_CEILOMETER"
-        	[${LOG}]="$VAR_LOG"
-	)
-}
+#init_dic() {
+#	NOVA="nova"
+#	NEUTRON="neutron"
+#	CINDER="cinder"
+#	CEILOMETER="ceilometer"
+#	LOG="log"
+#	
+#	ETC_NOVA="/etc/nova"
+#	ETC_NEUTRON="/etc/neutron"
+#	ETC_CINDER="/etc/cinder"
+#	ETC_CEILOMETER="/etc/ceilometer"
+#	VAR_LOG="/var/log"
+#
+#	dic=(
+#        	#[${NOVA}]=	'$ETC_NOVA               $BAK_NOVA       每周备份一次    52      12'
+#        	#[${NEUTRON}]=	'$ETC_NEUTRON            $BAK_NEUTRON    每周备份一次    24      12'
+#        	#[${CINDER}]=	'$ETC_CINDER             $BAK_CINDER     每周备份一次    56      12'
+#        	#[${CEILOMETER}]='$ETC_CEILOMETER         $BAK_CEILOMETER 每周备份一次    56      12'
+#        	#[${LOG}]=	'$VAR_LOG		 $BAK_LOG        每周备份一次    56      12'
+#		[${NOVA}]="$ETC_NOVA"
+#        	[${NEUTRON}]="$ETC_NEUTRON"
+#        	[${CINDER}]="$ETC_CINDER"
+#        	[${CEILOMETER}]="$ETC_CEILOMETER"
+#        	[${LOG}]="$VAR_LOG"
+#	)
+#}
 
 add_dic_from_ini() {
-	for key in ${!dic[*]}; do
-		crudini --get ${INI_FILE} $key &>/dev/null
-		if [ $? -ne 0 ]; then
-			continue
-		fi	
-		echo "oneline is ${dic[$key]}"
+	for key in `crudini --get ${INI_FILE}`; do
+		case $key in
+			conf | scp | ftp):
+				continue;;
+		esac
+		echo "key is ${key} in add_dic_from_ini"
+		backup_src=`crudini --get ${INI_FILE} $key src_path`
 		backup_dst=`crudini --get ${INI_FILE} $key backup_dstdir`
 		backup_remotedst=`crudini --get ${INI_FILE} $key remote_dstdir`
 		backup_period=`crudini --get ${INI_FILE} $key backup_period`
 		backup_volume=`crudini --get ${INI_FILE} $key backup_volume`
 		save_time=`crudini --get ${INI_FILE} $key save_time`
-		dic[$key]+=" $backup_dst $backup_remotedst $backup_period $backup_volume $save_time"
+		dic[$key]+=" $backup_src $backup_dst $backup_remotedst $backup_period $backup_volume $save_time"
 		echo "dic[key] = ${dic[$key]}"
 	done
 }
@@ -385,14 +386,13 @@ main() {
 	#echo "operation is" $operation
 
 	create_mysql
-	init_dic
 	add_dic_from_ini
 
 	for key in ${!dic[*]}; do
-		crudini --get ${INI_FILE} $key &>/dev/null
-		if [ $? -ne 0 ]; then
-			continue
-		fi
+#		crudini --get ${INI_FILE} $key &>/dev/null
+#		if [ $? -ne 0 ]; then
+#			continue
+#		fi
 		eval $operation $key
 	done
 }
