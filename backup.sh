@@ -26,7 +26,8 @@ get_package() {
 	if [ $? -ne 0 ]; then
 		${APT} install $2 -y
 		if [ $? -ne 0 ]; then
-        		panic "$2 is install failed!";
+        		echo "$2 is install failed!";
+			exit 1
 		fi
 	fi
 }
@@ -35,7 +36,8 @@ get_package() {
 check_and_mkpath() {
 	local dir=$1
 	if [ -e $dir -a ! -d $dir ]; then
-        	panic "$dir is exist but not a dir";
+        	echo "$dir is exist but not a dir";
+		exit 1
 	fi
 	[ -d $dir ] || (echo "mkdir $dir";mkdir $dir -p)
 
@@ -101,6 +103,9 @@ create_mysql() {
   				PRIMARY KEY (uuid),
   				UNIQUE INDEX uuid_etc_bakup_UNIQUE (uuid ASC) VISIBLE);"
 	mysql -u root -e "${CREATE_TABLE_SQL}" -p$password
+	if [ $? -ne 0 ]; then
+		exit 1
+	fi
 }
 
 mytar_to_somewhere() {
@@ -115,7 +120,8 @@ mytar_to_somewhere() {
 
 	local uuid=`uuidgen`
 
-	local filename=`hostname`_${datetime}_${servername}_conf.tar.gz
+	local _datetime=${datetime_tosql/ /_}
+	local filename=`hostname`_${_datetime}_${servername}_conf.tar.gz
 
 	if [ ! -d $srcpath ]; then
 		echo "$srcpath is not exist, skip"
@@ -132,6 +138,9 @@ mytar_to_somewhere() {
 		ADD_TABLE_SQL="insert into backup.etc_backup values(\"$uuid\", \"$servername\", \"$filename\", \"$srcpath\", \"$dstdir\", \"$remote_dstdir\", \"${datetime_tosql}\", \"$backup_per\", \"$backup_sto\", \"$save_time\");"	
 		echo "ADD_TABLE_SQL is $ADD_TABLE_SQL"
 		mysql -u root -e "${ADD_TABLE_SQL}" -p$password
+		if [ $? -ne 0 ]; then
+			exit 1
+		fi
 
 	fi
 	popd
@@ -194,7 +203,8 @@ myscp_to_somewhere() {
 
 
 	local uuid=`uuidgen`
-	local filename=`hostname`_${datetime}_${servername}_conf.tar.gz
+	local _datetime=${datetime_tosql/ /_}
+	local filename=`hostname`_${_datetime}_${servername}_conf.tar.gz
 
 	if [ ! -d $srcpath ]; then
 		echo "$srcpath is not exist, skip"
@@ -227,6 +237,9 @@ myscp_to_somewhere() {
 			ADD_TABLE_SQL="insert into backup.etc_backup values(\"$uuid\", \"$servername\", \"$filename\", \"$srcpath\", \"$dstdir\", \"${remote_dstdir}\", \"${datetime_tosql}\", \"$backup_per\", \"$backup_sto\", \"$save_time\");"	
 			echo "ADD_TABLE_SQL is $ADD_TABLE_SQL"
 			mysql -u root -e "${ADD_TABLE_SQL}" -p$password
+			if [ $? -ne 0 ]; then
+				exit 1
+			fi
 		else
 			echo "not insert to database, skipped!"
 		fi
@@ -252,7 +265,7 @@ EOF
                 return 0
         fi
         lftp -u ${user},${password} -p 21 ftp://${ip} << EOF
-        mkdir ${dstdir}
+        mkdir ${dstdir} -p
 EOF
         if [ $? -eq 0 ]; then
                 echo "mkdir ${dstdir}"
@@ -265,6 +278,69 @@ EOF
 
 
 myftp_to_somewhere() {
+        echo "this is myftp_to_somewhere"
+
+        local key=$1
+        local oneline=(${dic[$key]})
+        local servername=$key
+        local srcpath=${oneline[0]}
+        local remote_dstdir=${oneline[2]}/$datetime
+        local backup_per=${oneline[3]}
+        local backup_sto=${oneline[4]}
+        local save_time=${oneline[5]}
+
+
+        local uuid=`uuidgen`
+	local _datetime=${datetime_tosql/ /_}
+        local filename=`hostname`_${_datetime}_${servername}_conf.tar.gz
+
+        if [ ! -d $srcpath ]; then
+                echo "$srcpath is not exist, skip"
+                return
+        fi
+
+
+        local ip=`crudini --get ${INI_FILE} ftp ip`
+        local remote_user=`crudini --get ${INI_FILE} ftp user`
+        local remote_password=`crudini --get ${INI_FILE} ftp password`
+        echo "ip is $ip"
+        echo "remote_user is ${remote_user}"
+        echo "remote_password is ${remote_password}"
+        echo "remote_dstdir is ${remote_dstdir}"
+
+        check_and_mkpath_ftp $ip $remote_user $remote_password $remote_dstdir
+	if [ $? -ne 0 ]; then
+		echo "remote dstdir $remote_dstdir make failed, skip!"
+		return
+	fi
+
+        local tmpdir="/tmp/$servername"
+        check_and_mkpath $tmpdir
+        rm -rf $tmpdir/*
+
+        pushd $srcpath
+        echo "tar -czvf $tmpdir/$filename $srcpath/*"
+        tar -czvf $tmpdir/$filename ./*
+        if [ $? -eq 0 -o $? -eq 1 ]; then
+
+
+		echo "lftp -u ${remote_user},${remote_password} -p 21 ftp://${ip} : mirror -R $tmpdir $remote_dstdir"
+		lftp -u ${remote_user},${remote_password} -p 21 ftp://${ip} > /dev/null 2>&1 << EOF
+			mirror -R $tmpdir $remote_dstdir
+EOF
+                if [ $? -eq 0 ]; then
+                        ADD_TABLE_SQL="insert into backup.etc_backup values(\"$uuid\", \"$servername\", \"$filename\", \"$srcpath\", \"$dstdir\", \"${remote_dstdir}\", \"${datetime_tosql}\", \"$backup_per\", \"$backup_sto\", \"$save_time\");"
+                        echo "ADD_TABLE_SQL is $ADD_TABLE_SQL"
+                        mysql -u root -e "${ADD_TABLE_SQL}" -p$password
+			if [ $? -ne 0 ]; then
+				exit 1
+			fi
+                else
+                        echo "not insert to database, skipped!"
+                fi
+
+        fi
+        popd
 
 }
 
@@ -292,7 +368,13 @@ get_backup_operation() {
 
 
 main() {
-	read -p "input mysql password: " password
+	if [ `id -u` -ne 0 ]; then
+		echo "please use root privileges"
+		exit
+	fi
+
+	#read -p "input mysql password: " password
+	password=`crudini --get ${INI_FILE} conf mysql_password`
 
 	get_package crudini crudini
 	get_backup_operation operation
