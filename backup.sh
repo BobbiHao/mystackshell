@@ -373,10 +373,10 @@ main() {
 		exit
 	fi
 
+	get_package crudini crudini
 	#read -p "input mysql password: " password
 	password=`crudini --get ${INI_FILE} conf mysql_password`
 
-	get_package crudini crudini
 	get_backup_operation operation
 	#echo "operation is" $operation
 
