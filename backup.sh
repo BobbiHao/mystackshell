@@ -74,6 +74,10 @@ init_dic() {
 
 add_dic_from_ini() {
 	for key in ${!dic[*]}; do
+		crudini --get ${INI_FILE} $key &>/dev/null
+		if [ $? -ne 0 ]; then
+			continue
+		fi	
 		echo "oneline is ${dic[$key]}"
 		backup_dst=`crudini --get ${INI_FILE} $key backup_dstdir`
 		backup_remotedst=`crudini --get ${INI_FILE} $key remote_dstdir`
@@ -256,7 +260,7 @@ check_and_mkpath_ftp() {
         local password=$3
         local dstdir=$4
 
-        lftp -u ${user},${password} -p 21 ftp://${ip} > /dev/null 2>&1 << EOF
+        lftp -u ${user},${password} -p 21 ftp://${ip} &>/dev/null << EOF
         cd ${dstdir}
 EOF
 
@@ -383,8 +387,12 @@ main() {
 	create_mysql
 	init_dic
 	add_dic_from_ini
-	
+
 	for key in ${!dic[*]}; do
+		crudini --get ${INI_FILE} $key &>/dev/null
+		if [ $? -ne 0 ]; then
+			continue
+		fi
 		eval $operation $key
 	done
 }
