@@ -1,10 +1,11 @@
 #!/bin/bash
 
-INI_FILE=backup.ini
+INI_FILE=backup_new.ini
 
 datetime=`date +%Y-%m-%d`
 datetime_tosql=`date "+%Y-%m-%d %H:%M:%S"`
 
+REDIS_TMP=/tmp/redis-save
 declare -g password APT
 
 get_ostype() {
@@ -60,7 +61,7 @@ echo_green() {
 
 check_and_mkpath() {
 	local dir=$1
-	if [ -e $dir -a ! -d $dir ]; then
+	if [ -e $dir ] && [ ! -d $dir ]; then
         	echo "$dir is exist but not a dir";
 		exit 1
 	fi
@@ -73,35 +74,90 @@ declare -A dic
 #[${NOVA}]=	'$ETC_NOVA               $BAK_NOVA       每周备份一次    52      12'
 #[${NEUTRON}]=	'$ETC_NEUTRON            $BAK_NEUTRON    每周备份一次    24      12'
 add_dic_from_ini() {
+	local src_path unit data_type backup_dst backup_remotedst backup_period backup_volume save_time
+
+	local backup_type=`get_value conf backup_type`
+
 	echo_line_flag "INIT DIC FROM INI"
 	for key in `get_sections`; do
+		src_path=
+		unit=
+		data_type=
+		backup_dst= 
+		backup_remotedst= 
+		backup_period=
+		backup_volume=
+		save_time=
+
 		case $key in
 			conf | scp | ftp):
 				continue;;
 		esac
-		local backup_type=$(get_value conf backup_type)
-		local backup_src=`get_value $key src_path`
-		local backup_dst=`get_value $key backup_dstdir`
-		local backup_remotedst=`get_value $key remote_dstdir`
-		local backup_period=`get_value $key backup_period`
-		local backup_volume=`get_value $key backup_volume`
-		local save_time=`get_value $key save_time`
-		if [ "x"$backup_src = x ]; then
-			echo_red "get_value $key src_path is null, skip!"
-			continue	
+		#local backup_type=$(get_value conf backup_type)
+		if [[ $key = /* ]]; then
+			src_path=$key
+		else
+			if [[ "x"$key = "xredis" ]]; then
+				src_path=$REDIS_TMP
+			else
+				echo_red "$key is not begin with /, and it is no redis, exit!"
+				exit 1
+			fi
 		fi
-		if [ "x"$backup_dst = x ] &&  [ $backup_type = "local" ]; then
+		unit=`get_value $key unit`
+		data_type=`get_value $key data_type`
+		if [[ "x"${backup_type} = xlocal ]]; then
+			backup_dst=`get_value $key backup_dstdir`
+		else
+			backup_dst="-"
+		fi
+		if [[ "x"${backup_type} = xscp ]] || [[ "x"${backup_type} = xftp ]]; then
+			backup_remotedst=`get_value $key remote_dstdir`
+		else
+			backup_remotedst="-"
+		fi
+		backup_period=`get_value $key backup_period`
+		backup_volume=`get_value $key backup_volume`
+		save_time=`get_value $key save_time`
+
+		if [[ "x"$backup_dst = x ]] &&  [[ "x"$backup_type = "xlocal" ]]; then
 			echo_red "get_value $key backup_dstdir is null, skip!"
 			continue	
 		fi
-		if [ "x"$backup_remotedst = x ] &&  ([ $backup_type = "scp" ] || [ $backup_type = "ftp" ]); then
+		if [[ "x"$backup_remotedst = x ]] &&  ([[ "x"$backup_type = "xscp" ]] || [[ "x"$backup_type = "xftp" ]]); then
 			echo_red "get_value $key remote_dstdir is null, skip!"
 			continue	
 		fi
-		dic[$key]+=" $backup_src $backup_dst $backup_remotedst $backup_period $backup_volume $save_time"
-		echo "dic[$key] = ${dic[$key]}"
+		dic[${src_path}]+="$unit $data_type $backup_dst $backup_remotedst $backup_period $backup_volume $save_time"
+		echo "dic[$src_path] = ${dic[$src_path]}"
 	done
 	echo_line_flag "INIT DIC FROM INI END"
+}
+
+parse_dic_oneline() {
+	local key=$1
+	#local srcpath=$key
+	local oneline=(${dic[$key]})
+	local _servername=$2
+	local _data_type=$3
+	local _dstdir=$4
+	local _remote_dstdir=$5
+	local _backup_per=$6
+	local _backup_sto=$7
+	local _save_time=$8
+
+	eval $_servername="${oneline[0]}"
+	eval $_data_type="${oneline[1]}"
+	if [[ "x"${oneline[2]} != x ]] && [[ "x"${oneline[2]} != "x-" ]]; then
+		eval $_dstdir="${oneline[2]}/$datetime"
+	fi
+
+	if [[ "x"${oneline[3]} != x ]] && [[ "x"${oneline[3]} != "x-" ]]; then
+		eval $_remote_dstdir="${oneline[3]}/$datetime"
+	fi
+	eval $_backup_per="${oneline[4]}"
+	eval $_backup_sto="${oneline[5]}"
+	eval $_save_time="${oneline[6]}"
 }
 
 save_redis() {
@@ -111,11 +167,15 @@ save_redis() {
 		exit 1
 	fi
 
-	local bak_dst=`get_value redis src_path`	
-	if [ "x"$bak_dst = "x" ]; then
+	check_and_mkpath $REDIS_TMP
+	rm -rf $REDIS_TMP/*
+
+
+    	redis-cli CONFIG GET dir >/dev/null
+	if [ $? -ne 0 ]; then
+		echo_red "exit from save_redis"
 		exit 1
 	fi
-
 
     	redis-cli CONFIG GET dir | grep "NOAUTH Authentication required"
 	if [ $? -eq 0 ]; then
@@ -129,9 +189,8 @@ save_redis() {
 	fi
 
 	#echo "PASS=${PASS}"
-	check_and_mkpath $bak_dst
 	redis-cli $PASS >/dev/null << EOF
-		CONFIG SET dir ${bak_dst}
+		CONFIG SET dir $REDIS_TMP
 		SAVE
 EOF
 
@@ -168,18 +227,18 @@ create_mysql() {
 
 mytar_to_somewhere() {
 	local key=$1
-	local oneline=(${dic[$key]})
-	local servername=$key
-	local srcpath=${oneline[0]}
-	local dstdir=${oneline[1]}/$datetime
-	local backup_per=${oneline[3]}
-	local backup_sto=${oneline[4]}
-	local save_time=${oneline[5]}
+	local srcpath=$key
+
+	local servername data_type dstdir remote_dstdir backup_per backup_sto save_time
+	parse_dic_oneline $key servername data_type dstdir remote_dstdir backup_per backup_sto save_time
+
+	echo_green "servernam is $servername, data_type is $data_type, dstdir is $dstdir, remote_dstdir is $remote_dstdir, backup_per is $backup_per"
 
 	local uuid=`uuidgen`
 
 	local _datetime=${datetime_tosql/ /_}
-	local filename=`hostname`_${_datetime}_${servername}_conf.tar.gz
+	local srcpath_changed=${srcpath//\//_}
+	local filename=`hostname`_${_datetime}_${servername}_${srcpath_changed}_${data_type}.tar.gz
 
 	if [ ! -d $srcpath ]; then
 		echo_red "in mytar_to_somewhere: $srcpath is not exist, skip"
@@ -188,12 +247,15 @@ mytar_to_somewhere() {
 
 	check_and_mkpath $dstdir
 
-	pushd $srcpath
+	pushd $srcpath >/dev/null
 	echo "tar -czvf $dstdir/$filename $srcpath/*" >/dev/null
 	echo_green "please wait..."
 	tar -czvf $dstdir/$filename ./*
 	if [ $? -eq 0 -o $? -eq 1 ]; then
 
+		if [[ "x"$src_path = $REDIS_TMP ]]; then
+			srcpath=redis
+		fi
 		ADD_TABLE_SQL="insert into backup.etc_backup values(\"$uuid\", \"$servername\", \"$filename\", \"$srcpath\", \"$dstdir\", \"$remote_dstdir\", \"${datetime_tosql}\", \"$backup_per\", \"$backup_sto\", \"$save_time\");"	
 		echo "$ADD_TABLE_SQL"
 		mysql -u root -e "${ADD_TABLE_SQL}" -p$password &>/dev/null
@@ -248,15 +310,15 @@ EOF
 }
 
 
+		#dic[$src_path]+=" $unit $data_type $backup_dst $backup_remotedst $backup_period $backup_volume $save_time"
 myscp_to_somewhere() {
 	local key=$1
-	local oneline=(${dic[$key]})
-	local servername=$key
-	local srcpath=${oneline[0]}
-	local remote_dstdir=${oneline[2]}/$datetime
-	local backup_per=${oneline[3]}
-	local backup_sto=${oneline[4]}
-	local save_time=${oneline[5]}
+	local srcpath=$key
+
+	local servername data_type dstdir remote_dstdir backup_per backup_sto save_time
+	parse_dic_oneline $key servername data_type dstdir remote_dstdir backup_per backup_sto save_time
+
+	echo_green "servernam is $servername, data_type is $data_type, dstdir is $dstdir, remote_dstdir is $remote_dstdir, backup_per is $backup_per"
 
 
 	local uuid=`uuidgen`
@@ -403,9 +465,14 @@ EOF
 
 get_backup_operation() {
 	eval oper=$1
-	local type=`get_value conf backup_type`
-	echo "backup type is $type"
-	case $type in
+	local backup_type=`get_value conf backup_type`
+	if [[ "x"${backup_type} != xlocal ]] && [[ "x"${backup_type} != xscp ]] && [[ "x"${backup_type} != xftp ]]; then
+		echo_red "please ensure your backup_type in conf"
+		exit 1
+	fi
+
+	echo "backup type is ${backup_type}"
+	case ${backup_type} in
 		local)
 			eval $oper='mytar_to_somewhere'
 			;;
@@ -447,6 +514,8 @@ main() {
 	for key in ${!dic[*]}; do
 		eval $operation $key
 	done
+
+	echo_green "succeed, good bye"
 }
 
 main
