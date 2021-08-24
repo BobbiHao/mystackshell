@@ -253,7 +253,7 @@ mytar_to_somewhere() {
 	tar -czvf $dstdir/$filename ./*
 	if [ $? -eq 0 -o $? -eq 1 ]; then
 
-		if [[ "x"$src_path = $REDIS_TMP ]]; then
+		if [[ "x"$src_path = x$REDIS_TMP ]]; then
 			srcpath=redis
 		fi
 		ADD_TABLE_SQL="insert into backup.etc_backup values(\"$uuid\", \"$servername\", \"$filename\", \"$srcpath\", \"$dstdir\", \"$remote_dstdir\", \"${datetime_tosql}\", \"$backup_per\", \"$backup_sto\", \"$save_time\");"	
