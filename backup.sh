@@ -1,6 +1,6 @@
 #!/bin/bash
 
-INI_FILE=backup_new.ini
+INI_FILE=backup.ini
 
 datetime=`date +%Y-%m-%d`
 datetime_tosql=`date "+%Y-%m-%d %H:%M:%S"`
@@ -225,6 +225,32 @@ create_mysql() {
 	fi
 }
 
+splice_tarfilename() {
+	local servername=$1
+	local srcpath=$2
+	local data_type=$3
+
+	local _datetime=${datetime_tosql/ /_}
+	local srcpath_changed=${srcpath//\//_}
+
+
+	#filename=`hostname`_${_datetime}_${servername}_${srcpath_changed}_${data_type}.tar.gz
+	local filename=`hostname`_${_datetime}_${servername}
+	while [[ "x"${filename: -1} = "x_" ]];
+	do
+		filename=${filename%?}
+	done
+
+	filename+=${srcpath_changed}
+	while [[ "x"${filename: -1} = "x_" ]];
+	do
+		filename=${filename%?}
+	done
+	
+	filename+=_${data_type}.tar.gz
+	echo $filename
+}
+
 mytar_to_somewhere() {
 	local key=$1
 	local srcpath=$key
@@ -235,10 +261,7 @@ mytar_to_somewhere() {
 	echo_green "servernam is $servername, data_type is $data_type, dstdir is $dstdir, remote_dstdir is $remote_dstdir, backup_per is $backup_per"
 
 	local uuid=`uuidgen`
-
-	local _datetime=${datetime_tosql/ /_}
-	local srcpath_changed=${srcpath//\//_}
-	local filename=`hostname`_${_datetime}_${servername}_${srcpath_changed}_${data_type}.tar.gz
+	local filename=$(splice_tarfilename $servername $srcpath $data_type)
 
 	if [ ! -d $srcpath ]; then
 		echo_red "in mytar_to_somewhere: $srcpath is not exist, skip"
@@ -253,7 +276,7 @@ mytar_to_somewhere() {
 	tar -czvf $dstdir/$filename ./*
 	if [ $? -eq 0 -o $? -eq 1 ]; then
 
-		if [[ "x"$src_path = x$REDIS_TMP ]]; then
+		if [[ "x"$srcpath = x$REDIS_TMP ]]; then
 			srcpath=redis
 		fi
 		ADD_TABLE_SQL="insert into backup.etc_backup values(\"$uuid\", \"$servername\", \"$filename\", \"$srcpath\", \"$dstdir\", \"$remote_dstdir\", \"${datetime_tosql}\", \"$backup_per\", \"$backup_sto\", \"$save_time\");"	
@@ -320,10 +343,8 @@ myscp_to_somewhere() {
 
 	echo_green "servernam is $servername, data_type is $data_type, dstdir is $dstdir, remote_dstdir is $remote_dstdir, backup_per is $backup_per"
 
-
 	local uuid=`uuidgen`
-	local _datetime=${datetime_tosql/ /_}
-	local filename=`hostname`_${_datetime}_${servername}_conf.tar.gz
+	local filename=$(splice_tarfilename $servername $srcpath $data_type)
 
 	if [ ! -d $srcpath ]; then
 		echo_red "$srcpath is not exist, skip"
@@ -340,6 +361,9 @@ myscp_to_somewhere() {
 	echo    " remote_dstdir is ${remote_dstdir}"
 
 	check_and_mkpath_ssh $remote_dstdir $remote_user $ip $remote_password
+	if [ $? -ne 0 ]; then
+		exit 1
+	fi
 
 	local tmpdir="/tmp/$servername"
 	check_and_mkpath $tmpdir
@@ -354,6 +378,9 @@ myscp_to_somewhere() {
 		echo "scp $tmpdir/$filename $remote_user $ip $remote_password $remote_dstdir"
 		scp_expect $tmpdir/$filename $remote_user $ip $remote_password $remote_dstdir 
 		if [ $? -eq 0 ]; then
+			if [[ "x"$srcpath = x$REDIS_TMP ]]; then
+				srcpath=redis
+			fi
 			ADD_TABLE_SQL="insert into backup.etc_backup values(\"$uuid\", \"$servername\", \"$filename\", \"$srcpath\", \"$dstdir\", \"${remote_dstdir}\", \"${datetime_tosql}\", \"$backup_per\", \"$backup_sto\", \"$save_time\");"	
 			echo "$ADD_TABLE_SQL"
 			mysql -u root -e "${ADD_TABLE_SQL}" -p$password &>/dev/null
@@ -398,25 +425,21 @@ EOF
 
 
 myftp_to_somewhere() {
-        local key=$1
-        local oneline=(${dic[$key]})
-        local servername=$key
-        local srcpath=${oneline[0]}
-        local remote_dstdir=${oneline[2]}/$datetime
-        local backup_per=${oneline[3]}
-        local backup_sto=${oneline[4]}
-        local save_time=${oneline[5]}
+	local key=$1
+	local srcpath=$key
 
+	local servername data_type dstdir remote_dstdir backup_per backup_sto save_time
+	parse_dic_oneline $key servername data_type dstdir remote_dstdir backup_per backup_sto save_time
 
-        local uuid=`uuidgen`
-	local _datetime=${datetime_tosql/ /_}
-        local filename=`hostname`_${_datetime}_${servername}_conf.tar.gz
+	echo_green "servernam is $servername, data_type is $data_type, dstdir is $dstdir, remote_dstdir is $remote_dstdir, backup_per is $backup_per"
+
+	local uuid=`uuidgen`
+	local filename=$(splice_tarfilename $servername $srcpath $data_type)
 
         if [ ! -d $srcpath ]; then
                 echo_red "$srcpath is not exist, skip"
                 return
         fi
-
 
         local ip=`get_value ftp ip`
         local remote_user=`get_value ftp user`
@@ -448,6 +471,9 @@ myftp_to_somewhere() {
 			mirror -R $tmpdir $remote_dstdir
 EOF
                 if [ $? -eq 0 ]; then
+			if [[ "x"$srcpath = x$REDIS_TMP ]]; then
+				srcpath=redis
+			fi
                         ADD_TABLE_SQL="insert into backup.etc_backup values(\"$uuid\", \"$servername\", \"$filename\", \"$srcpath\", \"$dstdir\", \"${remote_dstdir}\", \"${datetime_tosql}\", \"$backup_per\", \"$backup_sto\", \"$save_time\");"
                         echo "$ADD_TABLE_SQL"
                         mysql -u root -e "${ADD_TABLE_SQL}" -p$password &>/dev/null
