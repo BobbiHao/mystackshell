@@ -164,7 +164,7 @@ save_redis() {
 	get_value redis &>/dev/null
 	if [ $? -ne 0 ]; then
 		echo_red "ini has no redis, skip to save it..."
-		exit 1
+		return 1
 	fi
 
 	check_and_mkpath $REDIS_TMP
@@ -518,17 +518,7 @@ get_backup_operation() {
 }
 
 
-main() {
-	if [ `id -u` -ne 0 ]; then
-		echo "please use root privileges"
-		exit
-	fi
-
-	get_package crudini crudini
-	#read -p "input mysql password: " password
-	password=`get_value conf mysql_password`
-
-
+Backup() {
 	save_redis
 
 	get_backup_operation operation
@@ -540,8 +530,44 @@ main() {
 	for key in ${!dic[*]}; do
 		eval $operation $key
 	done
+}
+
+Restore() {
+	echo "will restore"
+	if [ $# -eq 0 ]; then
+		echo "no args"
+	else
+		local onepath=$1
+		echo "onepath is $onepath"
+	fi
+
+
+
+
+}
+
+main() {
+	if [ `id -u` -ne 0 ]; then
+		echo "please use root privileges"
+		exit
+	fi
+
+	get_package crudini crudini
+	#read -p "input mysql password: " password
+	password=`get_value conf mysql_password`
+
+
+	local backup_or_restore=`get_value conf backup_or_restore`
+	if [[ "x"${backup_or_restore} = "xbackup" ]]; then
+		Backup
+	elif [[ "x"${backup_or_restore} = "xrestore" ]]; then
+		Restore	$@
+	else
+		echo_red "It is neither a backup nor a restore. exit!"
+		exit 1
+	fi
 
 	echo_green "succeed, good bye"
 }
 
-main
+main $@
