@@ -15,7 +15,8 @@ global REDIS_TMP
 REDIS_TMP = '/tmp/redis-save'
 dic = {}
 
-DATABASE_NAME = 'backup'
+DATABASE_NAME = 'backup_database'
+TABLE_NAME = 'backup_table'
 
 daytime = time.strftime("%Y-%m-%d", time.localtime())
 datetime = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
@@ -174,9 +175,14 @@ def save_redis() -> int:
 
 
 def create_mysql():
-    create_database_sql = "CREATE DATABASE IF NOT EXISTS backup"
+    password = get_value('conf', 'mysql_password')
 
-    create_table_sql = "CREATE TABLE IF NOT EXISTS backup.etc_backup (" \
+    create_database_sql = "CREATE DATABASE IF NOT EXISTS {}".format(DATABASE_NAME)
+    logging.info("mysql -u root -e '%s' -p'%s' >/dev/null" % (create_database_sql, password))
+    if os.system("mysql -u root -e '%s' -p'%s' >/dev/null" % (create_database_sql, password)) != 0:
+        exit(1)
+
+    create_table_sql = "CREATE TABLE IF NOT EXISTS {}.{} (" \
                         "uuid VARCHAR(45) NOT NULL," \
                         "servername VARCHAR(45) NOT NULL," \
                         "filename VARCHAR(1024) NOT NULL," \
@@ -188,9 +194,8 @@ def create_mysql():
                         "backup_sto VARCHAR(45) NOT NULL," \
                         "save_time VARCHAR(45) NOT NULL," \
                         "PRIMARY KEY(uuid)," \
-                        "UNIQUE INDEX uuid_etc_bakup_UNIQUE(uuid ASC) VISIBLE);"
+                        "UNIQUE INDEX uuid_etc_bakup_UNIQUE(uuid ASC) VISIBLE);".format(DATABASE_NAME, TABLE_NAME)
 
-    password = get_value('conf', 'mysql_password')
     logging.info("mysql -u root -e '%s' -p'%s' >/dev/null" % (create_table_sql, password))
     if os.system("mysql -u root -e '%s' -p'%s' >/dev/null" % (create_table_sql, password)) != 0:
         exit(1)
@@ -246,8 +251,8 @@ def insert_a_record_tomysql(record) -> int:
     backup_volume = record['backup_volume']
     save_time = record['save_time']
 
-    add_table_sql = "insert into backup.etc_backup values(\"%s\", \"%s\", \"%s\", \"%s\", \"%s\", \"%s\", \"%s\", \"%s\", \"%s\", \"%s\");" % (
-    uuid, servername, filename, srcpath, backup_dst, backup_remotedst, datetime, backup_period, backup_volume, save_time)
+    add_table_sql = "insert into %s.%s values(\"%s\", \"%s\", \"%s\", \"%s\", \"%s\", \"%s\", \"%s\", \"%s\", \"%s\", \"%s\");" % (
+    DATABASE_NAME, TABLE_NAME, uuid, servername, filename, srcpath, backup_dst, backup_remotedst, datetime, backup_period, backup_volume, save_time)
 
     logging.info("add table sql is '%s'" % add_table_sql)
     password = get_value('conf', 'mysql_password')
@@ -405,23 +410,23 @@ def _restore_local(srcpath_dstdir_remotedir_filename_tuples):
             exit(1)
 
 def restore_newest_local():
-    t = mysql_execute("select srcpath, dstdir, remotedir, filename from backup.etc_backup where createtime"
-                  " = (select createtime from backup.etc_backup where dstdir != '-' and createtime < NOW() limit 1);")
+    t = mysql_execute("select srcpath, dstdir, remotedir, filename from {0}.{1} where createtime"
+                  " = (select createtime from {0}.{1} where dstdir != '-' and createtime < NOW() limit 1);".format(DATABASE_NAME, TABLE_NAME))
     if not t:
         logging.error("there is not a valid record")
         exit(1)
     _restore_local(t)
 
 def restore_by_createtime_local(createtime):
-    t = mysql_execute("select srcpath, dstdir, remotedir, filename from backup.etc_backup where dstdir != '-' and createtime = '%s';"
-                       % createtime)
+    t = mysql_execute("select srcpath, dstdir, remotedir, filename from {}.{} where dstdir != '-' and createtime = '{}';"
+                        .format(DATABASE_NAME, TABLE_NAME, createtime))
     if not t:
         logging.error("there is not a valid record")
         exit(1)
     _restore_local(t)
 
 def restore_by_createday_local(createday):
-    t = mysql_execute("select DATE_FORMAT(createtime, '%Y-%m-%d') from backup.etc_backup;")
+    t = mysql_execute("select DATE_FORMAT(createtime, '%Y-%m-%d') from {}.{};".format(DATABASE_NAME, TABLE_NAME))
 
     flag = 1
     for i in t:
@@ -433,9 +438,9 @@ def restore_by_createday_local(createday):
         logging.error("there is not a valid record")
         exit(1)
 
-    t = mysql_execute("select srcpath, dstdir, remotedir, filename from backup.etc_backup where createtime"
-                      " = (select createtime from backup.etc_backup where dstdir != '-' and createtime like '{}%' "
-                      "and createtime < NOW() limit 1);".format(createday))
+    t = mysql_execute("select srcpath, dstdir, remotedir, filename from {0}.{1} where createtime"
+                      " = (select createtime from {0}.{1} where dstdir != '-' and createtime like '{2}%' "
+                      "and createtime < NOW() limit 1);".format(DATABASE_NAME, TABLE_NAME, createday))
     if not t:
         logging.error("there is not a valid record")
         exit(1)
@@ -487,8 +492,8 @@ def _restore_ftp(ftp, srcpath_dstdir_remotedir_filename_unit_tuples):
             exit(1)
 
 def restore_newest_ftp():
-    t = mysql_execute("select srcpath, dstdir, remotedir, filename, unit from backup.etc_backup where createtime"
-                  " = (select createtime from backup.etc_backup where remotedir != '-' and createtime < NOW() limit 1);")
+    t = mysql_execute("select srcpath, dstdir, remotedir, filename, unit from {0}.{1} where createtime"
+                  " = (select createtime from {0}.{1} where remotedir != '-' and createtime < NOW() limit 1);".format(DATABASE_NAME, TABLE_NAME))
     if not t:
         logging.error("there is not a valid record")
         exit(1)
