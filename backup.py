@@ -357,6 +357,9 @@ def mysql_execute(sql) -> dict:
         res = cs.fetchall()
         conn.commit()
 
+    logging.debug("sql: the result of %s is:" % sql)
+    for i in res:
+        logging.debug(i)
     return res
 
 def untar(srcpath, dstpath) -> bool:
@@ -368,15 +371,10 @@ def untar(srcpath, dstpath) -> bool:
             return False
     return True
 
-
-def restore_newest_local(path):
-    t = mysql_execute("select srcpath, dstdir, remotedir, filename from backup.etc_backup where createtime"
-                  " = (select createtime from backup.etc_backup where dstdir != '-' and createtime < NOW() limit 1);")
-
+def _restore_local(srcpath_dstdir_remotedir_filename_s):
     prefix = get_value('restore', 'prefix')
 
-    for key in t:
-        print("key is", key)
+    for key in srcpath_dstdir_remotedir_filename_s:
         srcpath = key[0]
 
         if srcpath.startswith('/') == False:
@@ -404,7 +402,43 @@ def restore_newest_local(path):
             logging.error("%s restore fail, exit" % srcpath)
             exit(1)
 
+def restore_newest_local():
+    t = mysql_execute("select srcpath, dstdir, remotedir, filename from backup.etc_backup where createtime"
+                  " = (select createtime from backup.etc_backup where dstdir != '-' and createtime < NOW() limit 1);")
+    if not t:
+        logging.error("there is not a valid record")
+        exit(1)
+    _restore_local(t)
 
+def restore_by_createtime_local(createtime):
+    t = mysql_execute("select srcpath, dstdir, remotedir, filename from backup.etc_backup where dstdir != '-' and createtime = '%s';"
+                       % createtime)
+    if not t:
+        logging.error("there is not a valid record")
+        exit(1)
+    _restore_local(t)
+
+def restore_by_createday_local(createday):
+
+    t = mysql_execute("select DATE_FORMAT(createtime, '%Y-%m-%d') from backup.etc_backup;")
+
+    flag = 1
+    for i in t:
+        if createday == i[0]:
+            flag = 0
+            break
+        flag = 1
+    if flag == 1:
+        logging.error("there is not a valid record")
+        exit (1)
+
+    t = mysql_execute("select srcpath, dstdir, remotedir, filename from backup.etc_backup where createtime"
+                      " = (select createtime from backup.etc_backup where dstdir != '-' and createtime like '{}%' "
+                      "and createtime < NOW() limit 1);".format(createday))
+    if not t:
+        logging.error("there is not a valid record")
+        exit(1)
+    _restore_local(t)
 
 def Backup():
     save_redis()
@@ -422,11 +456,23 @@ def Backup():
 
     opers[backup_type]()
 
+
 def Restore():
     logging.debug("will restore")
 
-    restore_newest_local('/etc/neutron/')
-
+    restore_time = get_value('restore', 'restore_time')
+    def is_valid_day(str):
+        try:
+            time.strptime(str, '%Y-%m-%d')
+            return True
+        except:
+            return False
+    if restore_time == '':
+        restore_newest_local()
+    elif is_valid_day(restore_time):
+        restore_by_createday_local(restore_time)
+    else:
+        restore_by_createtime_local(restore_time)
 
 
 if __name__ == "__main__":
