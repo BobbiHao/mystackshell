@@ -1,19 +1,21 @@
 #!/usr/bin/python3
 import logging
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.DEBUG)
 import time
 import os
 import string
 import socket
 import contextlib
 import ftplib
-
+import pymysql
 
 global INI_FILE
 INI_FILE = os.getcwd() + '/backup.ini'
 global REDIS_TMP
 REDIS_TMP = '/tmp/redis-save'
 dic = {}
+
+DATABASE_NAME = 'backup'
 
 daytime = time.strftime("%Y-%m-%d", time.localtime())
 datetime = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
@@ -81,14 +83,14 @@ def check_and_mkpath(dir):
         os.system("mkdir %s -p" %dir)
 
 def add_dic_from_ini():
-    backup_type = get_value('conf', 'backup_type')
+    backup_type = get_value('backup', 'backup_type')
     logging.info("INIT DIC FROM INI")
 
     sections = get_section()
     for key in sections:
         logging.debug("now in add_dic_fomr_ini, key is %s" %key)
         src_path = unit = data_type = backup_dst = backup_remotedst = backup_period = backup_volume = save_time = ''
-        if key == 'conf' or key == 'scp' or key == 'ftp':
+        if key == 'conf' or key == 'scp' or key == 'ftp' or key == 'backup' or key == 'restore':
             continue
 
         if key.startswith('/'):
@@ -339,6 +341,94 @@ def _myftp_to_somewhere(ftp):
         else:
             logging.error("key %s not insert to database, skipped!" % key)
 
+@contextlib.contextmanager
+def DB(database, hostip, port, user, password):
+    conn = pymysql.connect(host=hostip, port=3306, user=user, password=password, database=database, charset='gbk')
+    cs = conn.cursor()
+
+    yield conn, cs
+    cs.close()
+    conn.close()
+
+def mysql_execute(sql) -> dict:
+    password = get_value('conf', 'mysql_password')
+    with DB(database=DATABASE_NAME, hostip='127.0.0.1', port=3306, user='root', password=password) as (conn, cs):
+        cs.execute(sql)
+        res = cs.fetchall()
+        conn.commit()
+
+    return res
+
+def untar(srcpath, dstpath) -> bool:
+    if os.path.isdir(dstpath) == True:
+        if os.system("tar xvf %s -C %s" % (srcpath, dstpath)) == 2:
+            return False
+    else:
+        if os.system("tar xvf %s -C %s" % (srcpath, os.path.dirname(dstpath))) == 2:
+            return False
+    return True
+
+
+def restore_newest_local(path):
+    t = mysql_execute("select srcpath, dstdir, remotedir, filename from backup.etc_backup where createtime"
+                  " = (select createtime from backup.etc_backup where dstdir != '-' and createtime < NOW() limit 1);")
+
+    prefix = get_value('restore', 'prefix')
+
+    for key in t:
+        print("key is", key)
+        srcpath = key[0]
+
+        if srcpath.startswith('/') == False:
+            if srcpath == 'redis':
+                srcpath = REDIS_TMP;
+                logging.info("redis's srcpath is %s" % REDIS_TMP)
+            else:
+                logging.error("%s is not begin with '/', error restore, skip!" % srcpath)
+                continue
+
+        if prefix != '':
+            srcpath = prefix + "/" + srcpath
+            if os.path.isdir(srcpath) == True:
+                check_and_mkpath(srcpath)
+            else:
+                check_and_mkpath(os.path.dirname(srcpath))
+
+        dstdir = key[1]
+        remotedir = key[2]
+        filename = key[3]
+        if remotedir != '-':
+            logging.warning("restore in local, remotedst is not null, error, skip!")
+            continue
+        if untar(dstdir + "/" + filename, srcpath) == False:
+            logging.error("%s restore fail, exit" % srcpath)
+            exit(1)
+
+
+
+def Backup():
+    save_redis()
+    create_mysql()
+    add_dic_from_ini()
+
+    opers = dict()
+    opers['local'] = mylocal_to_somewhere
+    opers['scp'] = myscp_to_somewhere
+    opers['ftp'] = myftp_to_somewhere
+    backup_type = get_value('backup', 'backup_type')
+    if backup_type == '':
+        logging.error("please ensure your backup_type!")
+        exit(1)
+
+    opers[backup_type]()
+
+def Restore():
+    logging.debug("will restore")
+
+    restore_newest_local('/etc/neutron/')
+
+
+
 if __name__ == "__main__":
 
     if os.getuid() != 0:
@@ -347,16 +437,13 @@ if __name__ == "__main__":
 
     get_package('crudini', 'crudini')
 
-    save_redis()
+    backup_or_restore = get_value('conf', 'backup_or_restore')
+    if backup_or_restore == 'backup':
+        Backup()
+    elif backup_or_restore == 'restore':
+        Restore()
+    else:
+        logging.error("It is neither a backup nor a restore. exit!")
+        exit(1)
 
-    create_mysql()
-    add_dic_from_ini()
-
-    opers = dict()
-    opers['local'] = mylocal_to_somewhere
-    opers['scp'] = myscp_to_somewhere
-    opers['ftp'] = myftp_to_somewhere
-    backup_type = get_value('conf', 'backup_type')
-
-    opers[backup_type]()
     logging.info("succeed, good bye")
