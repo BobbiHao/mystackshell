@@ -371,10 +371,10 @@ def untar(srcpath, dstpath) -> bool:
             return False
     return True
 
-def _restore_local(srcpath_dstdir_remotedir_filename_s):
+def _restore_local(srcpath_dstdir_remotedir_filename_tuples):
     prefix = get_value('restore', 'prefix')
 
-    for key in srcpath_dstdir_remotedir_filename_s:
+    for key in srcpath_dstdir_remotedir_filename_tuples:
         srcpath = key[0]
 
         if srcpath.startswith('/') == False:
@@ -396,8 +396,10 @@ def _restore_local(srcpath_dstdir_remotedir_filename_s):
         remotedir = key[2]
         filename = key[3]
         if remotedir != '-':
-            logging.warning("restore in local, remotedst is not null, error, skip!")
+            logging.warning("restore in local, remotedir is not null, error, skip!")
             continue
+
+
         if untar(dstdir + "/" + filename, srcpath) == False:
             logging.error("%s restore fail, exit" % srcpath)
             exit(1)
@@ -419,7 +421,6 @@ def restore_by_createtime_local(createtime):
     _restore_local(t)
 
 def restore_by_createday_local(createday):
-
     t = mysql_execute("select DATE_FORMAT(createtime, '%Y-%m-%d') from backup.etc_backup;")
 
     flag = 1
@@ -430,7 +431,7 @@ def restore_by_createday_local(createday):
         flag = 1
     if flag == 1:
         logging.error("there is not a valid record")
-        exit (1)
+        exit(1)
 
     t = mysql_execute("select srcpath, dstdir, remotedir, filename from backup.etc_backup where createtime"
                       " = (select createtime from backup.etc_backup where dstdir != '-' and createtime like '{}%' "
@@ -439,6 +440,73 @@ def restore_by_createday_local(createday):
         logging.error("there is not a valid record")
         exit(1)
     _restore_local(t)
+
+#def restore_newest_local():
+#    t = mysql_execute("select srcpath, dstdir, remotedir, filename from backup.etc_backup where createtime"
+#                  " = (select createtime from backup.etc_backup where dstdir != '-' and createtime < NOW() limit 1);")
+#    if not t:
+#        logging.error("there is not a valid record")
+#        exit(1)
+#    _restore_local(t)
+
+def _restore_ftp(ftp, srcpath_dstdir_remotedir_filename_unit_tuples):
+    prefix = get_value('restore', 'prefix')
+
+    for key in srcpath_dstdir_remotedir_filename_unit_tuples:
+        srcpath = key[0]
+
+        if srcpath.startswith('/') == False:
+            if srcpath == 'redis':
+                srcpath = REDIS_TMP;
+                logging.info("redis's srcpath is %s" % REDIS_TMP)
+            else:
+                logging.error("%s is not begin with '/', error restore, skip!" % srcpath)
+                continue
+
+        if prefix != '':
+            srcpath = prefix + "/" + srcpath
+            if os.path.isdir(srcpath) == True:
+                check_and_mkpath(srcpath)
+            else:
+                check_and_mkpath(os.path.dirname(srcpath))
+
+        dstdir = key[1]
+        remotedir = key[2]
+        filename = key[3]
+        unit = key[4]
+
+        tmpdir = '/tmp/%s' % unit
+        check_and_mkpath(tmpdir)
+        os.system("rm -rf %s/*" % tmpdir)
+
+        if remotedir != '-':
+            logging.warning("restore in local, remotedst is not null, error, skip!")
+            continue
+        if untar(dstdir + "/" + filename, srcpath) == False:
+            logging.error("%s restore fail, exit" % srcpath)
+            exit(1)
+
+def restore_newest_ftp():
+    t = mysql_execute("select srcpath, dstdir, remotedir, filename, unit from backup.etc_backup where createtime"
+                  " = (select createtime from backup.etc_backup where remotedir != '-' and createtime < NOW() limit 1);")
+    if not t:
+        logging.error("there is not a valid record")
+        exit(1)
+
+    ftp_ip = get_value('ftp', 'ip')
+    remote_user = get_value('ftp', 'user')
+    remote_password = get_value('ftp', 'password')
+    logging.info("ip is %s, remote_user is %s, remote_password is %s" % (ftp_ip, remote_user, remote_password))
+
+    with MyFTP(ftp_ip) as ftp:
+        try:
+            ftp.login(remote_user, remote_password)
+            _restore_ftp(ftp, t)
+        except ftplib.all_errors as e:
+            logging.error("in restore_newest_ftp: %s" % e)
+
+
+
 
 def Backup():
     save_redis()
