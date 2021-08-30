@@ -1,6 +1,6 @@
-#!/usr/bin/python3
+#!/usr/bin/env python3
 import logging
-logging.basicConfig(level=logging.DEBUG)
+logging.basicConfig(level=logging.INFO)
 import time
 import os
 import string
@@ -8,21 +8,18 @@ import socket
 import contextlib
 import ftplib
 import pymysql
+from apscheduler.schedulers.blocking import BlockingScheduler
 
-global INI_FILE
 INI_FILE = os.getcwd() + '/backup.ini'
-global REDIS_TMP
 REDIS_TMP = '/tmp/redis-save'
-dic = {}
-
 DATABASE_NAME = 'backup_database'
 TABLE_NAME = 'backup_table'
+dic = {}
 
-daytime = time.strftime("%Y-%m-%d", time.localtime())
-datetime = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+def get_value(section, key):
+    res = os.popen("crudini --get %s %s %s 2>/dev/null" %(INI_FILE, section, key)).read().strip('\n')
+    return res
 
-print("daytime is ", daytime)
-print("datetime is ", datetime)
 
 class MyFTP(ftplib.FTP):
     def mkpath(self, dirpath):
@@ -50,10 +47,14 @@ class MyFTP(ftplib.FTP):
         else:
             return 0
 
+def less_debug() -> bool:
+    if logging.getLogger().level <= logging.DEBUG:
+        return True
+    return False
 
-def get_installcmd():
+def get_installcmd() -> str:
     os_VENDOR = os.popen("lsb_release -i -s").read().strip('\n')
-    print("os_VENDOR is ", os_VENDOR)
+    logging.info("os_VENDOR is %s" % os_VENDOR)
     if os_VENDOR.find("Debian") or os_VENDOR.find("Ubuntu") or os_VENDOR.find("LinuxMint"):
         return "apt"
     else:
@@ -65,23 +66,24 @@ def get_package(cmd, package):
     if isExist != 0:
         i = os.system("%s install %s" %(installcmd, package))
         if i != 0:
-            print("%s is install failed" %package)
+            logging.critical("%s is install failed" %package)
             exit(1)
 
-def get_value(section, key):
-    res = os.popen("crudini --get %s %s %s 2>/dev/null" %(INI_FILE, section, key)).read().strip('\n')
-    return res
 
 def get_section():
     return get_value('', '').split('\n')
 
-def check_and_mkpath(dir):
+def check_and_mkpath(dir) -> bool:
     if os.path.exists(dir) and os.path.isdir(dir) == False:
         logging.error("%s is exist but not a dir" %dir)
-        exit(1)
+        return False
     if os.path.exists(dir) == False:
-        logging.info("mkdir %s" %dir)
-        os.system("mkdir %s -p" %dir)
+        logging.debug("mkdir %s" %dir)
+        try:
+            os.system("mkdir %s -p" %dir)
+        except:
+            return False
+    return True
 
 def add_dic_from_ini():
     backup_type = get_value('backup', 'backup_type')
@@ -100,7 +102,7 @@ def add_dic_from_ini():
             if key == 'redis':
                 src_path = REDIS_TMP
             else:
-                logging.error("%s is not begin with / , and it is no redis, exit!")
+                logging.critical("%s is not begin with / , and it is no redis, exit!")
                 exit(1)
 
         unit = get_value(key, 'unit')
@@ -117,14 +119,15 @@ def add_dic_from_ini():
             backup_remotedst = '-'
 
         backup_period = get_value(key, 'backup_period')
+        backup_clocktime = get_value(key, 'backup_clocktime')
         backup_volume = get_value(key, 'backup_volume')
         save_time = get_value(key, 'save_time')
 
         if backup_dst == '' and backup_type == 'local':
-            logging.warning("get_value %s backup_dstdir is null, skip!" %key)
+            logging.error("get_value %s backup_dstdir is null, skip!" %key)
             continue
         if backup_remotedst == '' and (backup_type == 'scp' or backup_type == 'ftp'):
-            logging.warning("get_value %s remote_dstdir is null, skip!" %key)
+            logging.error("get_value %s remote_dstdir is null, skip!" %key)
             continue
 
         logging.debug("unit is %s" % unit)
@@ -137,24 +140,25 @@ def add_dic_from_ini():
             'backup_dst': backup_dst,
             'backup_remotedst': backup_remotedst,
             'backup_period': backup_period,
+            'backup_clocktime': backup_clocktime,
             'backup_volume': backup_volume,
             'save_time': save_time
         }
     logging.info("INIT DIC FROM INI END")
 
 
-def save_redis() -> int:
+def save_redis() -> bool:
     redis_values = get_value('redis', '').split('\n')
     logging.debug("redis_values is %s" % redis_values)
     if not redis_values:
         logging.warning("ini has no redis, skip to save it")
-        return 1
+        return False
     check_and_mkpath(REDIS_TMP)
     os.system("rm -rf %s/*" % REDIS_TMP)
 
     if os.system("redis-cli CONFIG GET dir > /dev/null") != 0:
-        logging.warning("exit from save_redis")
-        return 1
+        logging.error("exit from save_redis")
+        return False
 
     if os.system("redis-cli CONFIG GET dir | grep \"NOAUTH Authentication required\"") == 0:
         password = get_value('redis', 'server-password')
@@ -166,20 +170,24 @@ def save_redis() -> int:
     logging.debug("PASS is %s" % PASS)
 
     if os.system("redis-cli %s CONFIG SET dir %s > /dev/null" % (PASS, REDIS_TMP)) != 0:
-        return 1
+        return False
     if os.system("redis-cli SAVE > /dev/null") != 0:
-        logging.warning("redis data save failed!!!")
-        return 1
+        logging.error("redis data save failed!!!")
+        return False
     logging.info("redis data save succeed...")
-    return 0
+    return True
 
+def mysql_execute(sql) -> bool:
+    mysql_username = get_value('conf', 'mysql_username')
+    mysql_password = get_value('conf', 'mysql_password')
+    logging.debug("mysql -u %s -e '%s' -p'%s' >/dev/null" % (mysql_username, sql, mysql_password))
+    if os.system("mysql -u %s -e '%s' -p'%s' >/dev/null" % (mysql_username, sql, mysql_password)) != 0:
+        return False
+    return True
 
 def create_mysql():
-    password = get_value('conf', 'mysql_password')
-
     create_database_sql = "CREATE DATABASE IF NOT EXISTS {}".format(DATABASE_NAME)
-    logging.info("mysql -u root -e '%s' -p'%s' >/dev/null" % (create_database_sql, password))
-    if os.system("mysql -u root -e '%s' -p'%s' >/dev/null" % (create_database_sql, password)) != 0:
+    if mysql_execute(create_database_sql) == False:
         exit(1)
 
     create_table_sql = "CREATE TABLE IF NOT EXISTS {}.{} (" \
@@ -196,11 +204,10 @@ def create_mysql():
                         "PRIMARY KEY(uuid)," \
                         "UNIQUE INDEX uuid_etc_bakup_UNIQUE(uuid ASC) VISIBLE);".format(DATABASE_NAME, TABLE_NAME)
 
-    logging.info("mysql -u root -e '%s' -p'%s' >/dev/null" % (create_table_sql, password))
-    if os.system("mysql -u root -e '%s' -p'%s' >/dev/null" % (create_table_sql, password)) != 0:
+    if mysql_execute(create_table_sql) == False:
         exit(1)
 
-def splice_tarfilename(servername, srcpath, data_type) -> string:
+def splice_tarfilename(datetime, servername, srcpath, data_type) -> str:
     _datetime = datetime.replace(' ', '_')
     srcpath_changed = srcpath.replace('/', '_')
 
@@ -231,17 +238,20 @@ def get_a_insert_record(key) -> dict:
     oneline['backup_dst'] = dic[key]['backup_dst']
     oneline['backup_remotedst'] = dic[key]['backup_remotedst']
     oneline['backup_period'] = dic[key]['backup_period']
+    oneline['backup_clocktime'] = dic[key]['backup_clocktime']
     oneline['backup_volume'] = dic[key]['backup_volume']
     oneline['save_time'] = dic[key]['save_time']
     oneline['uuid'] = os.popen("uuidgen").read().strip('\n')
-    oneline['filename'] = splice_tarfilename(oneline['unit'], oneline['srcpath'], oneline['data_type'])
+    oneline['datetime'] = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+    oneline['filename'] = splice_tarfilename(oneline['datetime'], oneline['unit'], oneline['srcpath'], oneline['data_type'])
     logging.debug("srcpath: %s, unit: %s, data_type: %s, backup_dst: %s, backup_remotedst: %s, backup_period: %s, "
                   "backup_volume: %s, save_time: %s" % (oneline['srcpath'], oneline['unit'], oneline['data_type'], oneline['backup_dst'],
                     oneline['backup_remotedst'], oneline['backup_period'], oneline['backup_volume'], oneline['save_time']))
     return oneline
 
-def insert_a_record_tomysql(record) -> int:
+def insert_a_record_tomysql(record) -> bool:
     uuid = record['uuid']
+    datetime = record['datetime']
     servername = record['unit']
     filename = record['filename']
     srcpath = record['srcpath']
@@ -254,97 +264,185 @@ def insert_a_record_tomysql(record) -> int:
     add_table_sql = "insert into %s.%s values(\"%s\", \"%s\", \"%s\", \"%s\", \"%s\", \"%s\", \"%s\", \"%s\", \"%s\", \"%s\");" % (
     DATABASE_NAME, TABLE_NAME, uuid, servername, filename, srcpath, backup_dst, backup_remotedst, datetime, backup_period, backup_volume, save_time)
 
-    logging.info("add table sql is '%s'" % add_table_sql)
-    password = get_value('conf', 'mysql_password')
-    logging.debug("password is %s" % password)
-    logging.info("mysql -u root -e '%s' -p%s > /dev/null" % (add_table_sql, password))
-    return os.system("mysql -u root -e '%s' -p'%s' >/dev/null" % (add_table_sql, password))
+    logging.debug("add table sql is '%s'" % add_table_sql)
+    if mysql_execute(add_table_sql) == False:
+        return False
+    return True
 
-def tar_to_somewhere(srcpath, dstpath) -> int:
+def tar_to_somewhere(srcpath, dstpath) -> bool:
     if os.path.isdir(srcpath):
         srcpath_s_dir = srcpath
+        if not os.listdir(srcpath):
+            return False
     else:
         srcpath_s_dir = os.path.dirname(srcpath)
+
     with pushd(srcpath_s_dir):
         logging.debug("pushd in %s, now cwd is %s" % (srcpath_s_dir, os.getcwd()))
-        if os.path.isdir(srcpath):
-            logging.info("tar -czvf %s %s/*" % (dstpath, srcpath))
-            tarres = os.system("tar -czvf %s ./*" % dstpath)
-        else:
-            logging.info("tar -czvf %s %s" % (dstpath, srcpath))
-            tarres = os.system("tar -czvf %s %s" % (dstpath, os.path.basename(srcpath)))
-    return tarres
+        try:
+            if os.path.isdir(srcpath):
+                logging.info("tar -czvf %s %s/*" % (dstpath, srcpath))
+                if less_debug():
+                    tarres = os.system("tar -czvf %s ./*" % dstpath)
+                else:
+                    tarres = os.system("tar -czvf %s ./* >/dev/null 2>&1" % dstpath)
+            else:
+                logging.info("tar -czvf %s %s" % (dstpath, srcpath))
+                if less_debug():
+                    tarres = os.system("tar -czvf %s %s" % (dstpath, os.path.basename(srcpath)))
+                else:
+                    tarres = os.system("tar -czvf %s %s >/dev/null 2>&1" % (dstpath, os.path.basename(srcpath)))
+        except Exception as e:
+            logging.error("in tar_to_somewhere: %s" % e)
+            return False
 
-def mylocal_to_somewhere():
+    if tarres == 2:
+        return False
+    return True
+
+
+def mylocal_to_somewhere_onesrcpath(srcpath) -> bool:
+    if os.path.exists(srcpath) == False:
+        logging.error("in mylocal_to_somewhere_*: %s is not exist, failed to backup" % srcpath)
+        return False
+    a_insert_record = get_a_insert_record(srcpath)
+
+    daytime = time.strftime("%Y-%m-%d", time.strptime(a_insert_record['datetime'], "%Y-%m-%d %H:%M:%S"))
+    check_and_mkpath(a_insert_record['backup_dst'] + "/" + daytime)
+
+    tarres = tar_to_somewhere(srcpath, a_insert_record['backup_dst'] + "/" + daytime + "/" + a_insert_record['filename'])
+    # if tarres == 0 or tarres == 1:
+    if tarres == False:
+        return False
+    if srcpath == REDIS_TMP:
+        a_insert_record['srcpath'] = 'redis'
+    if insert_a_record_tomysql(a_insert_record) == False:
+        return False
+    return True
+
+
+def mylocal_to_somewhere_all():
+    scheduler = BlockingScheduler()
     for key in dic.keys():
         logging.debug("key is %s" % key)
-        if os.path.exists(key) == False:
-            logging.warning("in mylocal_to_somewhere: %s is not exist, skip" % key)
-            continue
+        backup_period = dic[key]['backup_period']
+        backup_clocktime = dic[key]['backup_clocktime']
 
-        a_insert_record = get_a_insert_record(key)
+        if backup_period == '':
+            backup_period = 7
 
-        check_and_mkpath(a_insert_record['backup_dst'] + "/" + daytime)
+        def is_valid_clocktime(str):
+            try:
+                time.strptime(str, "%H:%M:%S")
+                return True
+            except:
+                return False
+        if backup_clocktime == '':
+            scheduler.add_job(mylocal_to_somewhere_onesrcpath, 'interval', days=int(backup_period), args=[key])
+        elif is_valid_clocktime(backup_clocktime):
+            hour = time.strftime("%H", time.strptime(backup_clocktime, "%H:%M:%S"))
+            minute = time.strftime("%M", time.strptime(backup_clocktime, "%H:%M:%S"))
+            second = time.strftime("%S", time.strptime(backup_clocktime, "%H:%M:%S"))
+            scheduler.add_job(mylocal_to_somewhere_onesrcpath, 'cron', day=backup_period, hour=hour, minute=minute, second=second, args=[key])
+        else:
+            logging.critical("backup_clocktime %s in section %s is invaild!" % (backup_clocktime, key))
+            exit(1)
+        mylocal_to_somewhere_onesrcpath(key)
+    scheduler.start()
 
-        tarres = tar_to_somewhere(key, a_insert_record['backup_dst'] + "/" + daytime + "/" + a_insert_record['filename']);
-        if tarres == 0 or tarres == 1:
-            if key == REDIS_TMP:
-                a_insert_record['srcpath'] = 'redis'
-            if insert_a_record_tomysql(a_insert_record) != 0:
-                exit(1)
+def mylocal_to_somewhere():
+    srcpath = get_value('backup', 'srcpath')
+    if srcpath == '':
+        mylocal_to_somewhere_all()
+    else:
+        mylocal_to_somewhere_onesrcpath(srcpath)
 
 def myscp_to_somewhere():
-    print("this is myscp_to_somewhere")
+    logging.debug("this is myscp_to_somewhere")
 
 
 def myftp_to_somewhere():
-    print("this is myftp_to_somewhere")
+    logging.debug("this is myftp_to_somewhere")
+    srcpath = get_value('backup', 'srcpath')
+    if srcpath == '':
+        myftp_to_somewhere_all()
+    else:
+        myftp_to_somewhere_onesrcpath(srcpath)
 
+def myftp_to_somewhere_onesrcpath(srcpath) -> bool:
     ftp_ip = get_value('ftp', 'ip')
     remote_user = get_value('ftp', 'user')
     remote_password = get_value('ftp', 'password')
-    logging.info("ip is %s, remote_user is %s, remote_password is %s" % (ftp_ip, remote_user, remote_password))
+    logging.debug("ip is %s, remote_user is %s, remote_password is %s" % (ftp_ip, remote_user, remote_password))
 
     with MyFTP(ftp_ip) as ftp:
         try:
             ftp.login(remote_user, remote_password)
-            _myftp_to_somewhere(ftp)
+            _myftp_to_somewhere_onesrcpath(ftp, srcpath)
         except ftplib.all_errors as e:
             logging.error("in myftp_to_somewhere: %s" %e)
 
+def _myftp_to_somewhere_onesrcpath(ftp, srcpath) -> bool:
+    if os.path.exists(srcpath) == False:
+        logging.error("in myftp_to_somewhere_*: %s is not exist, failed to backup" % srcpath)
+        return False
+    a_insert_record = get_a_insert_record(srcpath)
 
-def _myftp_to_somewhere(ftp):
+    backup_remotedst = a_insert_record['backup_remotedst']
+    daytime = time.strftime("%Y-%m-%d", time.strptime(a_insert_record['datetime'], "%Y-%m-%d %H:%M:%S"))
+    if ftp.ftp_check_and_mkpath(backup_remotedst + "/" + daytime) != 0:
+        logging.error("remote dstdir %s make failed, failed to backup %s" % (backup_remotedst, srcpath))
+        return False
 
+    tmpdir = '/tmp/%s' % a_insert_record['unit']
+    check_and_mkpath(tmpdir)
+    os.system("rm -rf %s/*" % tmpdir)
+
+    srcfilepath = tmpdir + "/" + a_insert_record['filename']
+    tarres = tar_to_somewhere(srcpath, srcfilepath)
+    # if tarres == 0 or tarres == 1:
+    if tarres == True:
+        with open(srcfilepath, 'rb') as fp:
+            res = ftp.storbinary("STOR " + backup_remotedst + "/" + daytime + "/" + a_insert_record['filename'], fp)
+            if not res.startswith('226 Transfer complete'):
+                logging.error('%s Upload failed', srcfilepath)
+                return False
+        if srcpath == REDIS_TMP:
+            a_insert_record['srcpath'] = 'redis'
+        if insert_a_record_tomysql(a_insert_record) == False:
+            return False
+    else:
+        return False
+
+def myftp_to_somewhere_all():
+    scheduler = BlockingScheduler()
     for key in dic.keys():
         logging.debug("key is %s" % key)
-        if os.path.exists(key) == False:
-            logging.warning("in mylocal_to_somewhere: %s is not exist, skip" % key)
-            continue
+        backup_period = dic[key]['backup_period']
+        backup_clocktime = dic[key]['backup_clocktime']
 
-        a_insert_record = get_a_insert_record(key)
-        backup_remotedst = a_insert_record['backup_remotedst']
-        if ftp.ftp_check_and_mkpath(backup_remotedst + "/" + daytime) != 0:
-            logging.error("remote dstdir %s make failed, skip" % backup_remotedst)
-            continue
+        if backup_period == '':
+            backup_period = 7
 
-        tmpdir = '/tmp/%s' % a_insert_record['unit']
-        check_and_mkpath(tmpdir)
-        os.system("rm -rf %s/*" % tmpdir)
-
-        srcfilepath = tmpdir + "/" + a_insert_record['filename']
-        tarres = tar_to_somewhere(key, srcfilepath)
-        if tarres == 0 or tarres == 1:
-            with open(srcfilepath, 'rb') as fp:
-                res = ftp.storbinary("STOR " + backup_remotedst + "/" + daytime + "/" + a_insert_record['filename'], fp)
-                if not res.startswith('226 Transfer complete'):
-                    logging.error('%s Upload failed', srcfilepath)
-                    continue
-            if key == REDIS_TMP:
-                a_insert_record['srcpath'] = 'redis'
-            if insert_a_record_tomysql(a_insert_record) != 0:
-                exit(1)
+        def is_valid_clocktime(str):
+            try:
+                time.strptime(str, "%H:%M:%S")
+                return True
+            except:
+                return False
+        if backup_clocktime == '':
+            # scheduler.add_job(myftp_to_somewhere_onesrcpath, 'interval', days=int(backup_period), args=[key])
+            scheduler.add_job(myftp_to_somewhere_onesrcpath, 'interval', minutes=2, args=[key])
+        elif is_valid_clocktime(backup_clocktime):
+            hour = time.strftime("%H", time.strptime(backup_clocktime, "%H:%M:%S"))
+            minute = time.strftime("%M", time.strptime(backup_clocktime, "%H:%M:%S"))
+            second = time.strftime("%S", time.strptime(backup_clocktime, "%H:%M:%S"))
+            scheduler.add_job(myftp_to_somewhere_onesrcpath, 'cron', day=backup_period, hour=hour, minute=minute, second=second, args=[key])
         else:
-            logging.error("key %s not insert to database, skipped!" % key)
+            logging.critical("backup_clocktime %s in section %s is invaild!" % (backup_clocktime, key))
+            exit(1)
+        myftp_to_somewhere_onesrcpath(key)
+    scheduler.start()
 
 @contextlib.contextmanager
 def DB(database, hostip, port, user, password):
@@ -356,9 +454,10 @@ def DB(database, hostip, port, user, password):
     conn.close()
 
 def mysql_execute(sql) -> dict:
+    username = get_value('conf', 'mysql_username')
     password = get_value('conf', 'mysql_password')
     try:
-        with DB(database=DATABASE_NAME, hostip='127.0.0.1', port=3306, user='root', password=password) as (conn, cs):
+        with DB(database=DATABASE_NAME, hostip='127.0.0.1', port=3306, user=username, password=password) as (conn, cs):
             cs.execute(sql)
             res = cs.fetchall()
             conn.commit()
@@ -374,65 +473,84 @@ def untar(srcpath, dstpath) -> bool:
     if os.path.exists(srcpath) == False:
         logging.error("%s is not exist" %srcpath)
         return False
-    if os.path.isdir(dstpath) == True:
-        if os.system("tar xvf %s -C %s" % (srcpath, dstpath)) == 2:
-            return False
-    else:
-        if os.path.exists(os.path.dirname(dstpath)) == False:
-            logging.error("%s is not exist" % os.path.dirname(dstpath))
-            return False
-        if os.system("tar xvf %s -C %s" % (srcpath, os.path.dirname(dstpath))) == 2:
-            return False
+    try:
+        if os.path.isdir(dstpath) == True:
+            logging.info("tar xvf %s -C %s" % (srcpath, dstpath))
+            if less_debug():
+                tarres = os.system("tar xvf %s -C %s" % (srcpath, dstpath))
+            else:
+                tarres = os.system("tar xvf %s -C %s >/dev/null 2>&1" % (srcpath, dstpath))
+        else:
+            if os.path.exists(os.path.dirname(dstpath)) == False:
+                logging.error("%s is not exist" % os.path.dirname(dstpath))
+                return False
+            logging.info("tar xvf %s -C %s" % (srcpath, os.path.dirname(dstpath)))
+            if less_debug():
+                tarres = os.system("tar xvf %s -C %s" % (srcpath, os.path.dirname(dstpath)))
+            else:
+                tarres = os.system("tar xvf %s -C %s >/dev/null 2>&1" % (srcpath, os.path.dirname(dstpath)))
+    except Exception as e:
+        logging.error("in untar: %s" % e)
+        return False
+    if tarres == 2:
+        return False
     return True
 
-def _restore_local(srcpath_dstdir_remotedir_filename_tuples):
+def restore_local_onesrcpath(srcpath_dstdir_remotedir_daytime_filename_tuple) -> bool:
     prefix = get_value('restore', 'prefix')
+    srcpath = srcpath_dstdir_remotedir_daytime_filename_tuple[0]
+    dstdir = srcpath_dstdir_remotedir_daytime_filename_tuple[1]
+    remotedir = srcpath_dstdir_remotedir_daytime_filename_tuple[2]
+    daytime = srcpath_dstdir_remotedir_daytime_filename_tuple[3]
+    filename = srcpath_dstdir_remotedir_daytime_filename_tuple[4]
 
-    for key in srcpath_dstdir_remotedir_filename_tuples:
-        srcpath = key[0]
+    if srcpath.startswith('/') == False:
+        if srcpath == 'redis':
+            srcpath = REDIS_TMP;
+            logging.debug("redis's srcpath is %s" % REDIS_TMP)
+        else:
+            logging.error("%s is not begin with '/', error restore!" % srcpath)
+            return False
+    if prefix != '':
+        srcpath = prefix + "/" + srcpath
+        if os.path.isdir(srcpath) == True:
+            check_and_mkpath(srcpath)
+        else:
+            check_and_mkpath(os.path.dirname(srcpath))
 
-        if srcpath.startswith('/') == False:
-            if srcpath == 'redis':
-                srcpath = REDIS_TMP;
-                logging.info("redis's srcpath is %s" % REDIS_TMP)
-            else:
-                logging.error("%s is not begin with '/', error restore, skip!" % srcpath)
-                continue
+    if remotedir != '-':
+        logging.error("restore in local, remotedir is not null, error")
+        return False
 
-        if prefix != '':
-            srcpath = prefix + "/" + srcpath
-            if os.path.isdir(srcpath) == True:
-                check_and_mkpath(srcpath)
-            else:
-                check_and_mkpath(os.path.dirname(srcpath))
+    if untar(dstdir + "/" + daytime + "/" + filename, srcpath) == False:
+        logging.error("%s untar error, restore fail" % srcpath)
+        return False
+    logging.info("restore_local_onesrcpath %s success" % srcpath)
+    return True
 
-        dstdir = key[1]
-        remotedir = key[2]
-        daytime = key[3]
-        filename = key[4]
-        if remotedir != '-':
-            logging.warning("restore in local, remotedir is not null, error, skip!")
+def restore_newest_local_all():
+    sections = get_section()
+    for key in sections:
+        if key == 'conf' or key == 'scp' or key == 'ftp' or key == 'backup' or key == 'restore':
             continue
+        t = mysql_execute("select srcpath, dstdir, remotedir, DATE_FORMAT(createtime, '%Y-%m-%d'), filename from {0}.{1} where "
+                          "srcpath = '{2}' and dstdir != '-' order by createtime desc limit 1;".format(DATABASE_NAME, TABLE_NAME, key))
+        if not t:
+            logging.error("select srcpath: %s, but there is not a valid record" % (key))
+            continue
+        restore_local_onesrcpath(t[0])
 
-        if untar(dstdir + "/" + daytime + "/" + filename, srcpath) == False:
-            logging.error("%s restore fail, exit" % srcpath)
-            exit(1)
-
-def restore_newest_local():
-    t = mysql_execute("select srcpath, dstdir, remotedir, DATE_FORMAT(createtime, '%Y-%m-%d'), filename from {0}.{1} where createtime"
-                  " = (select createtime from {0}.{1} where dstdir != '-' and createtime < NOW() order by createtime desc limit 1);".format(DATABASE_NAME, TABLE_NAME))
-    if not t:
-        logging.error("there is not a valid record")
-        exit(1)
-    _restore_local(t)
-
-def restore_by_createtime_local(createtime):
-    t = mysql_execute("select srcpath, dstdir, remotedir, DATE_FORMAT(createtime, '%Y-%m-%d'), filename from {}.{} where dstdir != '-' and createtime = '{}';"
-                        .format(DATABASE_NAME, TABLE_NAME, createtime))
-    if not t:
-        logging.error("there is not a valid record")
-        exit(1)
-    _restore_local(t)
+def restore_by_createtime_local_all(createtime):
+    sections = get_section()
+    for key in sections:
+        if key == 'conf' or key == 'scp' or key == 'ftp' or key == 'backup' or key == 'restore':
+            continue
+        t = mysql_execute("select srcpath, dstdir, remotedir, DATE_FORMAT(createtime, '%Y-%m-%d'), filename from {0}.{1} where dstdir != '-' and createtime = '{2}' "
+                          "and srcpath = '{3}';".format(DATABASE_NAME, TABLE_NAME, createtime, key))
+        if not t:
+            logging.error("select srcpath: %s, createtime: %s, but there is not a valid record" % (key, createtime))
+            continue
+        restore_local_onesrcpath(t[0])
 
 def restore_by_createday_local(createday):
     createday_format = time.strftime("%Y-%m-%d", time.strptime(createday, "%Y-%m-%d"))
@@ -445,109 +563,113 @@ def restore_by_createday_local(createday):
             break
         flag = 1
     if flag == 1:
-        logging.error("there is not a valid record")
+        logging.critical("there is not a valid record")
         exit(1)
 
-    t = mysql_execute("select srcpath, dstdir, remotedir, DATE_FORMAT(createtime, '%Y-%m-%d'), filename from {0}.{1} where createtime"
-                      " = (select createtime from {0}.{1} where dstdir != '-' and createtime like '{2}%' "
-                      "order by createtime desc limit 1);".format(DATABASE_NAME, TABLE_NAME, createday_format))
-    if not t:
-        logging.error("there is not a valid record")
-        exit(1)
-    _restore_local(t)
-
-def _restore_ftp(ftp, srcpath_dstdir_remotedir_filename_servername_tuples):
-    prefix = get_value('restore', 'prefix')
-
-    for key in srcpath_dstdir_remotedir_filename_servername_tuples:
-        srcpath = key[0]
-
-        if srcpath.startswith('/') == False:
-            if srcpath == 'redis':
-                srcpath = REDIS_TMP;
-                logging.info("redis's srcpath is %s" % REDIS_TMP)
-            else:
-                logging.error("%s is not begin with '/', error restore, skip!" % srcpath)
-                continue
-
-        if prefix != '':
-            srcpath = prefix + "/" + srcpath
-            if os.path.isdir(srcpath) == True:
-                check_and_mkpath(srcpath)
-            else:
-                check_and_mkpath(os.path.dirname(srcpath))
-
-        dstdir = key[1]
-        remotedir = key[2]
-        daytime = key[3]
-        filename = key[4]
-        servername = key[5]
-
-        tmpdir = '/tmp/%s' % servername
-        check_and_mkpath(tmpdir)
-        os.system("rm -rf %s/*" % tmpdir)
-
-        if dstdir != '-':
-            logging.warning("restore in ftp, dstdir is not null, error, skip!")
+    sections = get_section()
+    for key in sections:
+        if key == 'conf' or key == 'scp' or key == 'ftp' or key == 'backup' or key == 'restore':
             continue
+        t = mysql_execute("select srcpath, dstdir, remotedir, DATE_FORMAT(createtime, '%Y-%m-%d'), filename from {0}.{1} where createtime"
+                      " = (select createtime from {0}.{1} where dstdir != '-' and createtime like '{2}%' and srcpath = '{3}' "
+                      "order by createtime desc limit 1);".format(DATABASE_NAME, TABLE_NAME, createday_format, key))
+        if not t:
+            logging.error("select srcpath: %s, createday: %s, but there is not a valid record" % (key, createday))
+            continue
+        restore_local_onesrcpath(t[0])
 
-        try:
-            with open(tmpdir + "/" + filename, 'wb') as fp:
-                res = ftp.retrbinary('RETR ' + remotedir + '/' + daytime + '/' + filename, fp.write)
-                if not res.startswith('226 Transfer complete'):
-                    logging.error('Downlaod %s/%s failed' % (tmpdir, filename))
-                    if os.path.isfile(tmpdir + "/" + filename):
-                        os.remove(tmpdir + "/" + filename)
-        except ftplib.all_errors as e:
-            logging.error("FTP error: %s" % e)
-            if os.path.isfile(tmpdir + "/" + filename):
-                os.remove(tmpdir + "/" + filename)
-                exit(1)
-
-        logging.debug("will untar %s/%s to %s" % (tmpdir, filename, srcpath))
-        if untar(tmpdir + "/" + filename, srcpath) == False:
-            logging.error("%s restore fail, exit" % srcpath)
-            exit(1)
-
-def restore_newest_ftp():
-    t = mysql_execute("select srcpath, dstdir, remotedir, DATE_FORMAT(createtime, '%Y-%m-%d'), filename, servername from {0}.{1} where createtime"
-                  " = (select createtime from {0}.{1} where remotedir != '-' and createtime < NOW() limit 1);".format(DATABASE_NAME, TABLE_NAME))
-    if not t:
-        logging.error("there is not a valid record")
-        exit(1)
-
+def restore_ftp_onesrcpath(srcpath_dstdir_remotedir_daytime_filename_servername_tuple) -> bool:
     ftp_ip = get_value('ftp', 'ip')
     remote_user = get_value('ftp', 'user')
     remote_password = get_value('ftp', 'password')
-    logging.info("ip is %s, remote_user is %s, remote_password is %s" % (ftp_ip, remote_user, remote_password))
+    logging.debug("ip is %s, remote_user is %s, remote_password is %s" % (ftp_ip, remote_user, remote_password))
 
     with MyFTP(ftp_ip) as ftp:
         try:
             ftp.login(remote_user, remote_password)
-            _restore_ftp(ftp, t)
+            _restore_ftp_onesrcpath(ftp, srcpath_dstdir_remotedir_daytime_filename_servername_tuple)
         except ftplib.all_errors as e:
-            logging.error("in restore_newest_ftp: %s" % e)
+            logging.error("in restore_ftp_onesrcpath: %s" % e)
 
-def restore_by_createtime_ftp(createtime):
-    t = mysql_execute("select srcpath, dstdir, remotedir, DATE_FORMAT(createtime, '%Y-%m-%d'), filename, servername from {}.{} where remotedir != '-' and createtime = '{}';"
-                        .format(DATABASE_NAME, TABLE_NAME, createtime))
-    if not t:
-        logging.error("there is not a valid record")
-        exit(1)
+def _restore_ftp_onesrcpath(ftp, srcpath_dstdir_remotedir_daytime_filename_servername_tuple) -> bool:
+    prefix = get_value('restore', 'prefix')
+    srcpath = srcpath_dstdir_remotedir_daytime_filename_servername_tuple[0]
+    dstdir = srcpath_dstdir_remotedir_daytime_filename_servername_tuple[1]
+    remotedir = srcpath_dstdir_remotedir_daytime_filename_servername_tuple[2]
+    daytime = srcpath_dstdir_remotedir_daytime_filename_servername_tuple[3]
+    filename = srcpath_dstdir_remotedir_daytime_filename_servername_tuple[4]
+    servername = srcpath_dstdir_remotedir_daytime_filename_servername_tuple[5]
 
-    ftp_ip = get_value('ftp', 'ip')
-    remote_user = get_value('ftp', 'user')
-    remote_password = get_value('ftp', 'password')
-    logging.info("ip is %s, remote_user is %s, remote_password is %s" % (ftp_ip, remote_user, remote_password))
+    if srcpath.startswith('/') == False:
+        if srcpath == 'redis':
+            srcpath = REDIS_TMP;
+            logging.info("redis's srcpath is %s" % REDIS_TMP)
+        else:
+            logging.error("%s is not begin with '/', error restore, skip!" % srcpath)
+            return False
 
-    with MyFTP(ftp_ip) as ftp:
-        try:
-            ftp.login(remote_user, remote_password)
-            _restore_ftp(ftp, t)
-        except ftplib.all_errors as e:
-            logging.error("in restore_newest_ftp: %s" % e)
+    if prefix != '':
+        srcpath = prefix + "/" + srcpath
+        if os.path.isdir(srcpath) == True:
+            check_and_mkpath(srcpath)
+        else:
+            check_and_mkpath(os.path.dirname(srcpath))
 
-def restore_by_createday_ftp(createday):
+    tmpdir = '/tmp/%s' % servername
+    check_and_mkpath(tmpdir)
+    os.system("rm -rf %s/*" % tmpdir)
+
+    if dstdir != '-':
+        logging.warning("restore in ftp, dstdir is not null, error, skip!")
+        return False
+
+    try:
+        with open(tmpdir + "/" + filename, 'wb') as fp:
+            res = ftp.retrbinary('RETR ' + remotedir + '/' + daytime + '/' + filename, fp.write)
+            if not res.startswith('226 Transfer complete'):
+                logging.error('Downlaod %s/%s failed' % (tmpdir, filename))
+                if os.path.isfile(tmpdir + "/" + filename):
+                    os.remove(tmpdir + "/" + filename)
+    except ftplib.all_errors as e:
+        logging.error("FTP error: %s" % e)
+        if os.path.isfile(tmpdir + "/" + filename):
+            os.remove(tmpdir + "/" + filename)
+            return False
+
+    if untar(tmpdir + "/" + filename, srcpath) == False:
+        logging.error("%s restore fail, exit" % srcpath)
+        logging.error("%s/%s untar error, restore fail" % (tmpdir, filename))
+        return False
+    logging.info("restore_ftp_onesrcpath %s success" % srcpath)
+    return True
+
+def restore_newest_ftp_all():
+    sections = get_section()
+    for key in sections:
+        if key == 'conf' or key == 'scp' or key == 'ftp' or key == 'backup' or key == 'restore':
+            continue
+        t = mysql_execute(
+            "select srcpath, dstdir, remotedir, DATE_FORMAT(createtime, '%Y-%m-%d'), filename, servername from {0}.{1} where "
+            "srcpath = '{2}' and remotedir != '-' order by createtime desc limit 1;".format(DATABASE_NAME, TABLE_NAME, key))
+        if not t:
+            logging.error("select srcpath: %s, but there is not a valid record" % (key))
+            continue
+        restore_ftp_onesrcpath(t[0])
+
+def restore_by_createtime_ftp_all(createtime):
+    sections = get_section()
+    for key in sections:
+        if key == 'conf' or key == 'scp' or key == 'ftp' or key == 'backup' or key == 'restore':
+            continue
+        t = mysql_execute(
+            "select srcpath, dstdir, remotedir, DATE_FORMAT(createtime, '%Y-%m-%d'), filename, servername from {0}.{1} where remotedir != '-' and createtime = '{2}' "
+            "and srcpath = '{3}';".format(DATABASE_NAME, TABLE_NAME, createtime, key))
+        if not t:
+            logging.error("select srcpath: %s, createtime: %s, but there is not a valid record" % (key, createtime))
+            continue
+        restore_ftp_onesrcpath(t[0])
+
+def restore_by_createday_ftp_all(createday):
     createday_format = time.strftime("%Y-%m-%d", time.strptime(createday, "%Y-%m-%d"))
 
     t = mysql_execute("select DATE_FORMAT(createtime, '%Y-%m-%d') from {}.{};".format(DATABASE_NAME, TABLE_NAME))
@@ -558,27 +680,21 @@ def restore_by_createday_ftp(createday):
             break
         flag = 1
     if flag == 1:
-        logging.error("there is not a valid record, createday is not exist!")
+        logging.critical("there is not a valid record")
         exit(1)
 
-    t = mysql_execute("select srcpath, dstdir, remotedir, DATE_FORMAT(createtime, '%Y-%m-%d'), filename, servername from {0}.{1} where createtime"
-                      " = (select createtime from {0}.{1} where remotedir != '-' and createtime like '{2}%' "
-                      "order by createtime desc limit 1);".format(DATABASE_NAME, TABLE_NAME, createday_format))
-    if not t:
-        logging.error("there is not a valid record")
-        exit(1)
-
-    ftp_ip = get_value('ftp', 'ip')
-    remote_user = get_value('ftp', 'user')
-    remote_password = get_value('ftp', 'password')
-    logging.info("ip is %s, remote_user is %s, remote_password is %s" % (ftp_ip, remote_user, remote_password))
-
-    with MyFTP(ftp_ip) as ftp:
-        try:
-            ftp.login(remote_user, remote_password)
-            _restore_ftp(ftp, t)
-        except ftplib.all_errors as e:
-            logging.error("in restore_newest_ftp: %s" % e)
+    sections = get_section()
+    for key in sections:
+        if key == 'conf' or key == 'scp' or key == 'ftp' or key == 'backup' or key == 'restore':
+            continue
+        t = mysql_execute(
+            "select srcpath, dstdir, remotedir, DATE_FORMAT(createtime, '%Y-%m-%d'), filename, servername from {0}.{1} where createtime"
+            " = (select createtime from {0}.{1} where remotedir != '-' and createtime like '{2}%' and srcpath = '{3}' "
+            "order by createtime desc limit 1);".format(DATABASE_NAME, TABLE_NAME, createday_format, key))
+        if not t:
+            logging.error("select srcpath: %s, createday: %s, but there is not a valid record" % (key, createday))
+            continue
+        restore_ftp_onesrcpath(t[0])
 
 
 def Backup():
@@ -592,10 +708,11 @@ def Backup():
     opers['ftp'] = myftp_to_somewhere
     backup_type = get_value('backup', 'backup_type')
     if backup_type == '':
-        logging.error("please ensure your backup_type!")
+        logging.critical("please ensure your backup_type!")
         exit(1)
 
     opers[backup_type]()
+    logging.info("succeed, good bye")
 
 
 def Restore():
@@ -611,28 +728,29 @@ def Restore():
             return False
     if restore_type == 'local':
         if restore_time == '':
-            restore_newest_local()
+            restore_newest_local_all()
         elif is_valid_day(restore_time):
             restore_by_createday_local(restore_time)
         else:
-            restore_by_createtime_local(restore_time)
+            restore_by_createtime_local_all(restore_time)
     elif restore_type == 'ftp':
         if restore_time == '':
-            restore_newest_ftp()
+            restore_newest_ftp_all()
         elif is_valid_day(restore_time):
-            restore_by_createday_ftp(restore_time)
+            restore_by_createday_ftp_all(restore_time)
         else:
-            restore_by_createtime_ftp(restore_time)
+            restore_by_createtime_ftp_all(restore_time)
     else:
-        logging.error("please ensure your restore_type")
+        logging.critical("please ensure your restore_type")
         exit(1)
 
 
 if __name__ == "__main__":
 
     if os.getuid() != 0:
-        logging.error("please use root privileges")
+        logging.critical("please use root privileges")
         exit(1)
+
 
     get_package('crudini', 'crudini')
 
@@ -644,5 +762,3 @@ if __name__ == "__main__":
     else:
         logging.error("It is neither a backup nor a restore. exit!")
         exit(1)
-
-    logging.info("succeed, good bye")
