@@ -431,8 +431,8 @@ def myftp_to_somewhere_all():
             except:
                 return False
         if backup_clocktime == '':
-            # scheduler.add_job(myftp_to_somewhere_onesrcpath, 'interval', days=int(backup_period), args=[key])
-            scheduler.add_job(myftp_to_somewhere_onesrcpath, 'interval', minutes=2, args=[key])
+            scheduler.add_job(myftp_to_somewhere_onesrcpath, 'interval', days=int(backup_period), args=[key])
+            #scheduler.add_job(myftp_to_somewhere_onesrcpath, 'interval', minutes=2, args=[key])
         elif is_valid_clocktime(backup_clocktime):
             hour = time.strftime("%H", time.strptime(backup_clocktime, "%H:%M:%S"))
             minute = time.strftime("%M", time.strptime(backup_clocktime, "%H:%M:%S"))
