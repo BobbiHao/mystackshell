@@ -767,10 +767,10 @@ if __name__ == "__main__":
         logging.critical("please use root privileges")
         exit(1)
 
-    if os.popen("lsb_release -i -s").read().strip('\n') == 'NFSServer':
-        fd_install_depencies()
-    else:
-        get_package('crudini', 'crudini')
+#    if os.popen("lsb_release -i -s").read().strip('\n') == 'NFSServer':
+#        fd_install_depencies()
+#    else:
+#        get_package('crudini', 'crudini')
 
     backup_or_restore = get_value('conf', 'backup_or_restore')
     if backup_or_restore == 'backup':
