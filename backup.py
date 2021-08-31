@@ -62,13 +62,28 @@ def get_installcmd() -> str:
 
 def get_package(cmd, package):
     installcmd = get_installcmd()
-    isExist = os.system("which %s" %cmd)
-    if isExist != 0:
+    prefixs = ['/usr/bin', '/usr/local/bin', '/bin', '/sbin']
+
+    flag = 0
+    for p in prefixs:
+        if os.path.exists(p + "/" + cmd):
+            flag = 1
+            break
+    if flag == 1:
         i = os.system("%s install %s" %(installcmd, package))
         if i != 0:
             logging.critical("%s is install failed" %package)
             exit(1)
 
+def fd_install_depencies():
+    def is_installed(package):
+        if os.system("pip3 show %s >/dev/null 2>&1" % (package)) == 0:
+            return True
+        return False
+    if not is_installed('APScheduler') or not is_installed('crudini') or not is_installed('pymysql'):
+        os.system("pip3 install ./depencies/*")
+    if not os.path.exists("/usr/bin/crudini") and os.path.exists("/usr/local/bin/crudini"):
+        os.system("ln /usr/local/bin/crudini -s /usr/bin/crudini")
 
 def get_section():
     return get_value('', '').split('\n')
@@ -177,7 +192,7 @@ def save_redis() -> bool:
     logging.info("redis data save succeed...")
     return True
 
-def mysql_execute(sql) -> bool:
+def mysql_execute_bool(sql) -> bool:
     mysql_username = get_value('conf', 'mysql_username')
     mysql_password = get_value('conf', 'mysql_password')
     logging.debug("mysql -u %s -e '%s' -p'%s' >/dev/null" % (mysql_username, sql, mysql_password))
@@ -186,8 +201,9 @@ def mysql_execute(sql) -> bool:
     return True
 
 def create_mysql():
-    create_database_sql = "CREATE DATABASE IF NOT EXISTS {}".format(DATABASE_NAME)
-    if mysql_execute(create_database_sql) == False:
+    create_database_sql = "CREATE DATABASE IF NOT EXISTS {};".format(DATABASE_NAME)
+    if mysql_execute_bool(create_database_sql) == False:
+        logging.critical("failed to create database")
         exit(1)
 
     create_table_sql = "CREATE TABLE IF NOT EXISTS {}.{} (" \
@@ -201,10 +217,11 @@ def create_mysql():
                         "backup_per VARCHAR(45) NOT NULL," \
                         "backup_sto VARCHAR(45) NOT NULL," \
                         "save_time VARCHAR(45) NOT NULL," \
-                        "PRIMARY KEY(uuid)," \
-                        "UNIQUE INDEX uuid_etc_bakup_UNIQUE(uuid ASC) VISIBLE);".format(DATABASE_NAME, TABLE_NAME)
+                        "PRIMARY KEY(uuid));".format(DATABASE_NAME, TABLE_NAME)
+                        #"UNIQUE INDEX uuid_etc_bakup_UNIQUE(uuid ASC) VISIBLE);".format(DATABASE_NAME, TABLE_NAME)
 
-    if mysql_execute(create_table_sql) == False:
+    if mysql_execute_bool(create_table_sql) == False:
+        logging.critical("failed to create table")
         exit(1)
 
 def splice_tarfilename(datetime, servername, srcpath, data_type) -> str:
@@ -265,7 +282,7 @@ def insert_a_record_tomysql(record) -> bool:
     DATABASE_NAME, TABLE_NAME, uuid, servername, filename, srcpath, backup_dst, backup_remotedst, datetime, backup_period, backup_volume, save_time)
 
     logging.debug("add table sql is '%s'" % add_table_sql)
-    if mysql_execute(add_table_sql) == False:
+    if mysql_execute_bool(add_table_sql) == False:
         return False
     return True
 
@@ -556,12 +573,11 @@ def restore_by_createday_local(createday):
     createday_format = time.strftime("%Y-%m-%d", time.strptime(createday, "%Y-%m-%d"))
 
     t = mysql_execute("select DATE_FORMAT(createtime, '%Y-%m-%d') from {}.{};".format(DATABASE_NAME, TABLE_NAME))
-    flag = 1
+    flag = 0
     for i in t:
         if createday_format == i[0]:
-            flag = 0
+            flag = 1
             break
-        flag = 1
     if flag == 1:
         logging.critical("there is not a valid record")
         exit(1)
@@ -751,8 +767,10 @@ if __name__ == "__main__":
         logging.critical("please use root privileges")
         exit(1)
 
-
-    get_package('crudini', 'crudini')
+    if os.popen("lsb_release -i -s").read().strip('\n') == 'NFSServer':
+        fd_install_depencies()
+    else:
+        get_package('crudini', 'crudini')
 
     backup_or_restore = get_value('conf', 'backup_or_restore')
     if backup_or_restore == 'backup':
