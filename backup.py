@@ -2,6 +2,7 @@
 import logging
 logging.basicConfig(level=logging.INFO)
 import time
+import datetime
 import os
 import string
 import socket
@@ -224,11 +225,11 @@ def create_mysql():
         logging.critical("failed to create table")
         exit(1)
 
-def splice_tarfilename(datetime, servername, srcpath, data_type) -> str:
-    _datetime = datetime.replace(' ', '_')
+def splice_tarfilename(dateTime, servername, srcpath, data_type) -> str:
+    _dateTime = dateTime.replace(' ', '_')
     srcpath_changed = srcpath.replace('/', '_')
 
-    filename = "%s_%s_%s" % (socket.gethostname(), _datetime, servername)
+    filename = "%s_%s_%s" % (socket.gethostname(), _dateTime, servername)
     while filename[-1] == '_':
         filename=filename[:-1]
     filename += srcpath_changed
@@ -268,7 +269,7 @@ def get_a_insert_record(key) -> dict:
 
 def insert_a_record_tomysql(record) -> bool:
     uuid = record['uuid']
-    datetime = record['datetime']
+    dateTime = record['datetime']
     servername = record['unit']
     filename = record['filename']
     srcpath = record['srcpath']
@@ -279,7 +280,7 @@ def insert_a_record_tomysql(record) -> bool:
     save_time = record['save_time']
 
     add_table_sql = "insert into %s.%s values(\"%s\", \"%s\", \"%s\", \"%s\", \"%s\", \"%s\", \"%s\", \"%s\", \"%s\", \"%s\");" % (
-    DATABASE_NAME, TABLE_NAME, uuid, servername, filename, srcpath, backup_dst, backup_remotedst, datetime, backup_period, backup_volume, save_time)
+    DATABASE_NAME, TABLE_NAME, uuid, servername, filename, srcpath, backup_dst, backup_remotedst, dateTime, backup_period, backup_volume, save_time)
 
     logging.debug("add table sql is '%s'" % add_table_sql)
     if mysql_execute_bool(add_table_sql) == False:
@@ -338,6 +339,17 @@ def mylocal_to_somewhere_onesrcpath(srcpath) -> bool:
     return True
 
 
+def get_datetime_after_now(time1): #return datetime.datetime
+    today = datetime.date.today()
+    today_time1 = datetime.datetime.strptime("%s %s" % (today, time1), "%Y-%m-%d %H:%M:%S")
+
+    now = datetime.datetime.now()
+    if today_time1 < now:
+        return today_time1 + datetime.timedelta(days=1)
+    else:
+        return today_time1
+
+
 def mylocal_to_somewhere_all():
     scheduler = BlockingScheduler()
     for key in dic.keys():
@@ -357,10 +369,8 @@ def mylocal_to_somewhere_all():
         if backup_clocktime == '':
             scheduler.add_job(mylocal_to_somewhere_onesrcpath, 'interval', days=int(backup_period), args=[key])
         elif is_valid_clocktime(backup_clocktime):
-            hour = time.strftime("%H", time.strptime(backup_clocktime, "%H:%M:%S"))
-            minute = time.strftime("%M", time.strptime(backup_clocktime, "%H:%M:%S"))
-            second = time.strftime("%S", time.strptime(backup_clocktime, "%H:%M:%S"))
-            scheduler.add_job(mylocal_to_somewhere_onesrcpath, 'cron', day=backup_period, hour=hour, minute=minute, second=second, args=[key])
+            starttime = get_datetime_after_now(backup_clocktime)
+            scheduler.add_job(mylocal_to_somewhere_onesrcpath, 'interval', start_date=starttime, days=int(backup_period), args=[key])
         else:
             logging.critical("backup_clocktime %s in section %s is invaild!" % (backup_clocktime, key))
             exit(1)
@@ -451,10 +461,8 @@ def myftp_to_somewhere_all():
             scheduler.add_job(myftp_to_somewhere_onesrcpath, 'interval', days=int(backup_period), args=[key])
             #scheduler.add_job(myftp_to_somewhere_onesrcpath, 'interval', minutes=2, args=[key])
         elif is_valid_clocktime(backup_clocktime):
-            hour = time.strftime("%H", time.strptime(backup_clocktime, "%H:%M:%S"))
-            minute = time.strftime("%M", time.strptime(backup_clocktime, "%H:%M:%S"))
-            second = time.strftime("%S", time.strptime(backup_clocktime, "%H:%M:%S"))
-            scheduler.add_job(myftp_to_somewhere_onesrcpath, 'cron', day=backup_period, hour=hour, minute=minute, second=second, args=[key])
+            starttime = get_datetime_after_now(backup_clocktime)
+            scheduler.add_job(mylocal_to_somewhere_onesrcpath, 'interval', start_date=starttime, days=int(backup_period), args=[key])
         else:
             logging.critical("backup_clocktime %s in section %s is invaild!" % (backup_clocktime, key))
             exit(1)
